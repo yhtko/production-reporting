@@ -1,0 +1,13 @@
+name = "kintone-pwa"
+compatibility_date = "2024-12-01"
+
+
+[vars]
+KINTONE_BASE = "https://yahatausa.kintone.com"
+KINTONE_LOG_APP = "123" # 実績
+KINTONE_PLAN_APP = "456" # 計画（任意）
+
+
+# シークレットは wrangler secret put で登録
+# KINTONE_TOKEN_LOG
+# KINTONE_TOKEN_PLAN

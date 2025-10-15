@@ -1,0 +1,6 @@
+body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; }
+.big { font-size: 24px; padding: 20px; width: 100%; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0; }
+label { display:block; margin-top:12px; }
+input, select, button { font-size: 18px; padding: 12px; }
+main { max-width: 520px; margin: auto; }

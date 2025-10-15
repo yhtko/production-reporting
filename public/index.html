@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="manifest" href="/manifest.webmanifest" />
+<title>生産実績ログ</title>
+<link rel="stylesheet" href="/src/ui.css" />
+</head>
+<body>
+<main>
+<section id="plan">
+<label>計画ID</label>
+<input id="planId" placeholder="スキャンまたは入力" />
+<button id="scanBtn">QR/バーコード</button>
+</section>
+
+
+<section class="grid">
+<button id="startBtn" class="big">開始</button>
+<button id="endBtn" class="big">終了</button>
+<button id="pauseBtn">一時停止</button>
+</section>
+
+
+<section id="inputs">
+<label>生産数</label>
+<input id="qty" type="number" inputmode="numeric" value="1" />
+
+
+<label>ダウン理由</label>
+<select id="downReason">
+<option value="">なし</option>
+<option>段取り</option>
+<option>材料待ち</option>
+<option>機械トラブル</option>
+</select>
+
+
+<label>ダウン(分)</label>
+<input id="downMin" type="number" inputmode="numeric" value="0" />
+</section>
+
+
+<section>
+<div>未送信: <span id="pendingCount">0</span> 件</div>
+<button id="syncBtn">今すぐ同期</button>
+</section>
+</main>
+
+
+<script src="/src/db.js"></script>
+<script src="/src/app.js"></script>
+<script>
+if ("serviceWorker" in navigator) {
+navigator.serviceWorker.register("/sw.js");
+}
+</script>
+</body>
+</html>
