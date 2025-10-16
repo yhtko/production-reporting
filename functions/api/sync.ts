@@ -1,17 +1,17 @@
 /// <reference types="@cloudflare/workers-types" />
+
 export interface Env {
-  KINTONE_BASE: string; // 例: https://xxxxx.cybozu.com
-  KINTONE_LOG_APP: string; // 実績ログアプリID（数値文字列）
-  KINTONE_TOKEN_LOG: string; // 実績ログAPIトークン（追加のみ）
-  KINTONE_TOKEN_LUP: string; //計画アプリAPIトークン（閲覧のみ）
+  KINTONE_BASE: string;       // 例: https://xxxxx.cybozu.com（末尾/なし）
+  KINTONE_LOG_APP: string;    // 実績アプリID（数値文字列）
+  KINTONE_TOKEN_LOG: string;  // 実績アプリのAPIトークン（追加権限）
+  KINTONE_TOKEN_LUP?: string; // 参照元(lookup)アプリのAPIトークン（閲覧権限）
 }
 
-// kintoneの /records.json と /record.json を両対応にまとめる
-type RecResp = { ids: string[]; revisions: string[] };      // /records.json
-type OneResp = { id: string; revision: string };            // /record.json
+// /records.json と /record.json を同じ形に寄せる
+type RecResp = { ids: string[]; revisions: string[] };
 function toRecResp(x: unknown): RecResp {
   const a = x as any;
-  if (a && Array.isArray(a.ids) && Array.isArray(a.revisions)) return a as RecResp;
+  if (a && Array.isArray(a.ids) && Array.isArray(a.revisions)) return a;
   if (a && typeof a.id === "string" && typeof a.revision === "string") {
     return { ids: [a.id], revisions: [a.revision] };
   }
@@ -24,126 +24,80 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Methods": "POST,OPTIONS",
 } as const;
 
-export const onRequestOptions: PagesFunction<Env> = async () => {
-  return new Response(null, { status: 204, headers: CORS_HEADERS });
-};
+export const onRequestOptions: PagesFunction<Env> = async () =>
+  new Response(null, { status: 204, headers: CORS_HEADERS });
 
 export const onRequestPost: PagesFunction<Env> = async (context) => {
   try {
-    // 文字列でもJSONでも受ける
-    let bodyText = "";
-    try { bodyText = await context.request.text(); } catch {}
+    // ---- JSONを安全に読む（文字列/JSONどちらでも）----
+    let txt = "";
+    try { txt = await context.request.text(); } catch {}
     let raw: any;
-    try { raw = bodyText ? JSON.parse(bodyText) : await context.request.json(); }
-    catch { return new Response(JSON.stringify({ error: "bad payload (not json)" }), { status: 400 }); }
+    try { raw = txt ? JSON.parse(txt) : await context.request.json(); }
+    catch { return new Response(JSON.stringify({ error: "bad payload (not json)" }), { status: 400, headers: CORS_HEADERS }); }
 
+    // 共通ヘッダー（複数トークンをカンマ連結）
+    const tokens = [context.env.KINTONE_TOKEN_LOG, context.env.KINTONE_TOKEN_LUP].filter(Boolean).join(",");
+    const jsonHeaders = { "Content-Type": "application/json", "X-Cybozu-API-Token": tokens };
 
-    // まずは kintoneネイティブ形式なら透過（record/records があり、fieldCode:{value} っぽい）
+    // ---- ① kintoneネイティブ形式ならそのまま透過 ----
     if (raw && typeof raw === "object" && ("record" in raw || "records" in raw)) {
-      const looksNative =
-        ("record" in raw && raw.record && typeof raw.record === "object") ||
-        ("records" in raw && Array.isArray(raw.records) &&
-          raw.records.length > 0 &&
-          typeof raw.records[0] === "object" &&
-          raw.records[0] !== null &&
-          // 先頭要素が fieldCode:{value:...} を1つ以上含んでいるかざっくり判定
-          Object.values(raw.records[0] as Record<string, any>).some((v) => v && typeof v === "object" && "value" in v)
-        );
-      if (looksNative) {
-        const app = raw.app ?? context.env.KINTONE_LOG_APP;
-        const hasRecord = "record" in raw;
-        const endpoint = `${context.env.KINTONE_BASE}/k/v1/${hasRecord ? "record" : "records"}.json`;
-        const payload = hasRecord ? { app, record: raw.record } : { app, records: raw.records };
-        const payloadText = JSON.stringify(payload);
-        const tokens = [context.env.KINTONE_TOKEN_LOG, context.env.KINTONE_TOKEN_LUP]
-          .filter(Boolean)
-          .join(",");
+      const hasRecord = "record" in raw;
+      const endpoint = `${context.env.KINTONE_BASE}/k/v1/${hasRecord ? "record" : "records"}.json`;
+      const app = raw.app ?? context.env.KINTONE_LOG_APP;
+      const payload = hasRecord ? { app, record: raw.record } : { app, records: raw.records };
 
-        const res = await fetch(endpoint, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Cybozu-API-Token": tokens,
-          },
-          body: payloadText,
-        });
-        if (!res.ok) {
-          const errText = await res.text();
-          return new Response(errText, { status: res.status, headers: { "Content-Type": "application/json", ...CORS_HEADERS } });
-        }
-        const kRaw: unknown = await res.json();
-        const k = toRecResp(kRaw);
-        return new Response(JSON.stringify({ ok: true, ids: k.ids, revisions: k.revisions }), {
-          status: 200, headers: { "Content-Type": "application/json", ...CORS_HEADERS }
+      const res = await fetch(endpoint, { method: "POST", headers: jsonHeaders, body: JSON.stringify(payload) });
+      if (!res.ok) {
+        const err = await res.text();
+        return new Response(err, { status: res.status, headers: { "Content-Type": "application/json", ...CORS_HEADERS } });
+      }
+      const k = toRecResp(await res.json());
+      return new Response(JSON.stringify({ ok: true, ids: k.ids, revisions: k.revisions }), {
+        status: 200, headers: { "Content-Type": "application/json", ...CORS_HEADERS }
       });
     }
 
-    // ---- 簡易形式として配列に正規化（{records:[…]} も配列にする／数値へ強制変換）----
-    let arr: any[] = [];
-    if (Array.isArray(raw)) {
-      arr = raw;
-    } else if (raw && typeof raw === "object" && Array.isArray(raw.records)) {
-      arr = raw.records;
-    } else {
-      return new Response(JSON.stringify({ error: "bad payload (array or {records:[]} expected)" }), { status: 400 });
+    // ---- ② 簡易形式 {records:[{planId,startAt,...}]} or 配列 → kintone形式へ変換 ----
+    const arr: any[] =
+      Array.isArray(raw) ? raw :
+      (raw && typeof raw === "object" && Array.isArray(raw.records)) ? raw.records :
+      [];
+
+    if (!arr.length) {
+      return new Response(JSON.stringify({ error: "bad payload (array or {records:[]} expected)" }), { status: 400, headers: CORS_HEADERS });
     }
 
-    const toNumber = (v: any) => (typeof v === "number" ? v : Number(v));
-    const records = arr.map((r) => ({
-      planId: String((r as any).planId ?? ""),
-      startAt: String((r as any).startAt ?? ""),
-      endAt: String((r as any).endAt ?? ""),
-      qty: toNumber((r as any).qty ?? 0),
-      downtimeMin: toNumber((r as any).downtimeMin ?? 0),
-      downtimeReason: (r as any).downtimeReason ?? "",
-      operator: (r as any).operator ?? "",
-      equipment: (r as any).equipment ?? "",
-      deviceId: (r as any).deviceId ?? "",
-    })).filter((r) => r.planId && r.startAt && r.endAt);
+    const asNum = (v: any) => (typeof v === "number" ? v : Number(v));
+    const kintoneRecords = arr.map((r) => ({
+      plan_id:        { value: String(r?.planId ?? "") },
+      start_at:       { value: String(r?.startAt ?? "") },
+      end_at:         { value: String(r?.endAt ?? "") },
+      quantity:       { value: asNum(r?.qty ?? 0) },
+      downtime_min:   { value: asNum(r?.downtimeMin ?? 0) },
+      downtime_reason:{ value: String(r?.downtimeReason ?? "") },
+      operator:       { value: String(r?.operator ?? "") },
+      equipment:      { value: String(r?.equipment ?? "") },
+      device_id:      { value: String(r?.deviceId ?? "") },
+    })).filter(r => r.plan_id.value && r.start_at.value && r.end_at.value);
 
-    if (!records.length) {
-      return new Response(JSON.stringify({ error: "bad payload (required fields missing)" }), { status: 400 });
+    if (!kintoneRecords.length) {
+      return new Response(JSON.stringify({ error: "bad payload (required fields missing)" }), { status: 400, headers: CORS_HEADERS });
     }
-
-    // kintoneレコード形式に変換
-    const kintoneRecords = records.map((r) => ({
-      plan_id:        { value: r.planId },
-      start_at:       { value: r.startAt },
-      end_at:         { value: r.endAt },
-      quantity:       { value: Number(r.qty) },
-      downtime_min:   { value: Number(r.downtimeMin) },
-      downtime_reason:{ value: r.downtimeReason ?? '' },
-      operator:       { value: r.operator ?? '' },
-      equipment:      { value: r.equipment ?? '' },
-      device_id:      { value: r.deviceId ?? '' },
-    }));
-
 
     const endpoint = `${context.env.KINTONE_BASE}/k/v1/records.json`;
-    const payloadText = JSON.stringify({ app: context.env.KINTONE_LOG_APP, records: kintoneRecords });
-    const tokens = [context.env.KINTONE_TOKEN_LOG, context.env.KINTONE_TOKEN_LUP]
-      .filter(Boolean)
-      .join(",");
+    const payload = { app: context.env.KINTONE_LOG_APP, records: kintoneRecords };
 
-    const res = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Cybozu-API-Token": tokens,
-      },
-      body: payloadText,
-    });
-
+    const res = await fetch(endpoint, { method: "POST", headers: jsonHeaders, body: JSON.stringify(payload) });
     if (!res.ok) {
-      const errText = await res.text();
-      return new Response(errText, { status: res.status, headers: { "Content-Type": "application/json", ...CORS_HEADERS } });
+      const err = await res.text();
+      return new Response(err, { status: res.status, headers: { "Content-Type": "application/json", ...CORS_HEADERS } });
     }
-    const kRaw: unknown = await res.json();
-    const k = toRecResp(kRaw);
+    const k = toRecResp(await res.json());
     return new Response(JSON.stringify({ ok: true, ids: k.ids, revisions: k.revisions }), {
       status: 200, headers: { "Content-Type": "application/json", ...CORS_HEADERS }
     });
   } catch (e: any) {
-    return new Response(JSON.stringify({ error: e?.message || String(e) }), { status: 400 });
+    return new Response(JSON.stringify({ error: e?.message || String(e) }), { status: 400, headers: CORS_HEADERS });
   }
 };
