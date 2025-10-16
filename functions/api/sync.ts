@@ -76,8 +76,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       quantity:       { value: asNum(r?.qty ?? 0) },
       downtime_min:   { value: asNum(r?.downtimeMin ?? 0) },
       downtime_reason:{ value: String(r?.downtimeReason ?? "") },
-      operator:       { value: String(r?.operator ?? "") },
-      equipment:      { value: String(r?.equipment ?? "") },
+      operator:       { value: (String(r?.operator ?? "").trim() || "-")  },
+      equipment:      { value: (String(r?.equipment ?? "") .trim() || "-") },
     })).filter(r => r.plan_id.value && r.start_at.value && r.end_at.value);
 
     if (!kintoneRecords.length) {
