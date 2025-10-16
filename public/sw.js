@@ -9,14 +9,23 @@ self.addEventListener('activate', (e) => {
 });
 self.addEventListener('fetch', (e) => {
   const { request } = e;
+  // GET 以外 / http(s) 以外 / 自分のオリジン以外 は触らない
   if (request.method !== 'GET') return;
+  const url = new URL(request.url);
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return;
+  if (url.origin !== self.location.origin) return;
+
   e.respondWith(
-    caches.match(request).then(cached =>
-      cached || fetch(request).then(res => {
-        const copy = res.clone();
-        caches.open(CACHE).then(c => c.put(request, copy));
+    caches.match(request).then(cached => {
+      if (cached) return cached;
+      return fetch(request).then(res => {
+        // 成功レスだけキャッシュ（basic = 同一オリジン）
+        if (res.ok && res.type === 'basic') {
+          const copy = res.clone();
+          caches.open(CACHE).then(c => c.put(request, copy));
+        }
         return res;
-      }).catch(()=> caches.match('/index.html'))
-    )
+      }).catch(() => caches.match('/index.html'));
+    })
   );
 });

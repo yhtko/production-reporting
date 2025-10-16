@@ -41,13 +41,16 @@ const msg = (t, ok=false) => { const m=$('msg'); m.textContent=t; m.className= o
 
 // --- 送信本体 ---
 async function postRecords(records) {
-  const res = await fetch('/api/sync', {
+  const res = await fetch('https://production-reporting.pages.dev/api/sync', {
     method: 'POST',
     headers: { 'Content-Type':'application/json' },
     body: JSON.stringify({ records })
   });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
+   const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}: ${text}`);
+  }
+  try { return JSON.parse(text); } catch { return { ok:true, raw:text }; }
 }
 
 // --- 送信処理 ---
@@ -79,6 +82,7 @@ $('reportForm').addEventListener('submit', async (e) => {
     }
 
     const record = { planId, startAt, endAt, qty, downtimeMin, operator, equipment, deviceId };
+    console.log('POST payload', { records:[record] });
     // オンラインなら即送信、失敗したらキューへ
     if (navigator.onLine) {
       try {
@@ -96,6 +100,7 @@ $('reportForm').addEventListener('submit', async (e) => {
     // $('qty').value = 0; $('downtimeMin').value = 0;
   } catch (e) {
     msg('送信エラー: ' + (e?.message || e));
+    console.error(e);
   }
 });
 
