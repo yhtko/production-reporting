@@ -5,86 +5,116 @@ export interface Env {
   KINTONE_TOKEN_LOG: string; // 実績ログAPIトークン（追加のみ）
 }
 
- // 受信レコードの型
- export type ProdLog = {
-   planId: string;
-   startAt: string;
-   endAt: string;
-   qty: number;
-   downtimeMin: number;
-   downtimeReason?: string;
-   operator?: string;
-   equipment?: string;
-   deviceId?: string;
-   localId?: number;
- };
 
- // 要素検証
- function isRecord(x: unknown): x is ProdLog {
-   if (typeof x !== 'object' || x === null) return false;
-   const o = x as Record<string, unknown>;
-   return typeof o.planId === 'string'
-     && typeof o.startAt === 'string'
-     && typeof o.endAt === 'string'
-     && typeof o.qty === 'number'
-     && typeof o.downtimeMin === 'number';
- }
-
- // 受信ボディを正規化（配列 or {records: [...]})
- function normalizeBody(body: unknown): ProdLog[] {
-   if (Array.isArray(body)) {
-     const ok = body.filter(isRecord) as ProdLog[];
-     if (ok.length !== body.length) throw new Error('invalid item in array');
-     return ok;
-   }
-   if (typeof body === 'object' && body !== null && Array.isArray((body as any).records)) {
-     const arr = (body as any).records as unknown[];
-     const ok = arr.filter(isRecord) as ProdLog[];
-     if (ok.length !== arr.length) throw new Error('invalid item in records');
-     return ok;
-   }
-   throw new Error('bad payload');
- }
-
-export const onRequestPost: PagesFunction<Env> = async (context) => {
+ export const onRequestPost: PagesFunction<Env> = async (context) => {
   try {
-    const raw: unknown = await context.request.json(); 
-    const records = normalizeBody(raw);                
-    if (!records || !Array.isArray(records) || records.length === 0) {
-      return new Response(JSON.stringify({ error: "no records" }), { status: 400 });
+    // 文字列でもJSONでも受ける
+    let bodyText = "";
+    try { bodyText = await context.request.text(); } catch {}
+    let raw: any;
+    try { raw = bodyText ? JSON.parse(bodyText) : await context.request.json(); }
+    catch { return new Response(JSON.stringify({ error: "bad payload (not json)" }), { status: 400 }); }
+
+
+    // まずは kintoneネイティブ形式なら透過（record/records があり、fieldCode:{value} っぽい）
+    if (raw && typeof raw === "object" && ("record" in raw || "records" in raw)) {
+      const looksNative =
+        ("record" in raw && raw.record && typeof raw.record === "object") ||
+        ("records" in raw && Array.isArray(raw.records) &&
+          raw.records.length > 0 &&
+          typeof raw.records[0] === "object" &&
+          raw.records[0] !== null &&
+          // 先頭要素が fieldCode:{value:...} を1つ以上含んでいるかざっくり判定
+          Object.values(raw.records[0] as Record<string, any>).some((v) => v && typeof v === "object" && "value" in v)
+        );
+      if (looksNative) {
+        const app = raw.app ?? context.env.KINTONE_LOG_APP;
+        const hasRecord = "record" in raw;
+        const endpoint = `${context.env.KINTONE_BASE}/k/v1/${hasRecord ? "record" : "records"}.json`;
+        const payload = hasRecord ? { app, record: raw.record } : { app, records: raw.records };
+        const payloadText = JSON.stringify(payload);
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Cybozu-API-Token': context.env.KINTONE_TOKEN_LOG,
+          },
+          body: payloadText,
+        });
+        const kBody = await res.text();
+        return new Response(JSON.stringify({
+          forwarded: true,
+          endpoint,
+          app,
+          sentCount: hasRecord ? 1 : (raw.records?.length ?? 0),
+          sentPayloadPreview: payloadText.slice(0, 400),
+          kintoneStatus: res.status,
+          kintoneOk: res.ok,
+          kintoneBody: kBody
+        }), { status: res.ok ? 200 : 502, headers: { "Content-Type": "application/json" } });
+       }
+    }
+
+    // ---- 簡易形式として配列に正規化（{records:[…]} も配列にする／数値へ強制変換）----
+    let arr: any[] = [];
+    if (Array.isArray(raw)) {
+      arr = raw;
+    } else if (raw && typeof raw === "object" && Array.isArray(raw.records)) {
+      arr = raw.records;
+    } else {
+      return new Response(JSON.stringify({ error: "bad payload (array or {records:[]} expected)" }), { status: 400 });
+    }
+
+    const toNumber = (v: any) => (typeof v === "number" ? v : Number(v));
+    const records = arr.map((r) => ({
+      planId: String((r as any).planId ?? ""),
+      startAt: String((r as any).startAt ?? ""),
+      endAt: String((r as any).endAt ?? ""),
+      qty: toNumber((r as any).qty ?? 0),
+      downtimeMin: toNumber((r as any).downtimeMin ?? 0),
+      downtimeReason: (r as any).downtimeReason ?? "",
+      operator: (r as any).operator ?? "",
+      equipment: (r as any).equipment ?? "",
+      deviceId: (r as any).deviceId ?? "",
+    })).filter((r) => r.planId && r.startAt && r.endAt);
+
+    if (!records.length) {
+      return new Response(JSON.stringify({ error: "bad payload (required fields missing)" }), { status: 400 });
     }
 
     // kintoneレコード形式に変換
     const kintoneRecords = records.map((r) => ({
-      計画ID: { value: String(r.planId || "") },
-      開始日時: { value: r.startAt || null },
-      終了日時: { value: r.endAt || null },
-      生産数: { value: Number(r.qty || 0) },
-      ダウンタイム_分: { value: Number(r.downtimeMin || 0) },
-      ダウン理由: { value: r.downtimeReason ?? "" },
-      作業者: { value: r.operator ?? "" },
-      設備: { value: r.equipment ?? "" },
-      端末ID: { value: r.deviceId ?? "" },
+      plan_id:        { value: r.planId },
+      start_at:       { value: r.startAt },
+      end_at:         { value: r.endAt },
+      quantity:       { value: Number(r.qty) },
+      downtime_min:   { value: Number(r.downtimeMin) },
+      downtime_reason:{ value: r.downtimeReason ?? '' },
+      operator:       { value: r.operator ?? '' },
+      equipment:      { value: r.equipment ?? '' },
+      device_id:      { value: r.deviceId ?? '' },
     }));
 
 
     const endpoint = `${context.env.KINTONE_BASE}/k/v1/records.json`;
+    const payloadText = JSON.stringify({ app: context.env.KINTONE_LOG_APP, records: kintoneRecords });
     const res = await fetch(endpoint, {
       method: "POST",
-      headers: {
-      "Content-Type": "application/json",
-      "X-Cybozu-API-Token": context.env.KINTONE_TOKEN_LOG,
-      },
-      body: JSON.stringify({ app: context.env.KINTONE_LOG_APP, records: kintoneRecords }),
+      headers: { "Content-Type": "application/json", "X-Cybozu-API-Token": context.env.KINTONE_TOKEN_LOG },
+      body: payloadText,
     });
 
-  if (!res.ok) {
-    const text = await res.text();
-    return new Response(JSON.stringify({ error: "kintone error", detail: text }), { status: 502 });
+    const kBody = await res.text(); // ← kintoneの生レスポンス
+    return new Response(JSON.stringify({
+      forwarded: false,
+      endpoint, app: context.env.KINTONE_LOG_APP,
+      sentCount: kintoneRecords.length,
+      sentPayloadPreview: payloadText.slice(0, 400),
+      kintoneStatus: res.status,
+      kintoneOk: res.ok,
+      kintoneBody: kBody
+    }), { status: res.ok ? 200 : 502, headers: { "Content-Type": "application/json" } });
+  } catch (e: any) {
+    return new Response(JSON.stringify({ error: e?.message || String(e) }), { status: 400 });
   }
-
-  return new Response(JSON.stringify({ ok: true }), { status: 200 });
-} catch (e: any) {
-  return new Response(JSON.stringify({ error: e?.message || String(e) }), { status: 400 });
-}
 };

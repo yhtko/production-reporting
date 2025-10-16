@@ -19,7 +19,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
   // 計画IDでレコード特定 → ステータス更新（例: ドロップダウン/文字列）
   const endpoint = `${context.env.KINTONE_BASE}/k/v1/records.json`;
-  const query = `計画ID = "${planId}"`;
+  const query = `plan_id = "${planId}"`;
 
   // 1) 該当レコードの取得
   const getRes = await fetch(`${endpoint}?app=${context.env.KINTONE_PLAN_APP}&query=${encodeURIComponent(query)}`, {
@@ -39,7 +39,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       records: [
         {
           id: rec.$id.value,
-          record: { ステータス: { value: status } },
+          record: { status: { value: status } },
         },
       ],
     }),
