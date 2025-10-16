@@ -1,9 +1,9 @@
 {
-  "name": "生産実績ログ",
-  "short_name": "実績ログ",
+  "name": "Production Reporting",
+  "short_name": "ProdReport",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#ffffff",
-  "theme_color": "#000000",
+  "theme_color": "#0a84ff",
   "icons": []
 }

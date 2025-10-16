@@ -1,15 +1,22 @@
-self.addEventListener('install', (e)=>{
-  e.waitUntil(caches.open('static-v1').then((c)=>c.addAll([
-    '/', '/index.html', '/src/app.js', '/src/db.js', '/src/ui.css'
-  ])));
+const CACHE = 'pr-cache-v1';
+const ASSETS = ['/', '/index.html', '/app.js', '/manifest.webmanifest'];
+
+self.addEventListener('install', (e) => {
+  e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)));
 });
-
-
-self.addEventListener('fetch', (e)=>{
-  const url = new URL(e.request.url);
-  // APIはネット優先、静的はキャッシュ優先
-  if (url.pathname.startsWith('/api/')) return;
+self.addEventListener('activate', (e) => {
+  e.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(k=>k!==CACHE).map(k=>caches.delete(k)))));
+});
+self.addEventListener('fetch', (e) => {
+  const { request } = e;
+  if (request.method !== 'GET') return;
   e.respondWith(
-    caches.match(e.request).then((r)=> r || fetch(e.request))
+    caches.match(request).then(cached =>
+      cached || fetch(request).then(res => {
+        const copy = res.clone();
+        caches.open(CACHE).then(c => c.put(request, copy));
+        return res;
+      }).catch(()=> caches.match('/index.html'))
+    )
   );
 });

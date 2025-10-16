@@ -1,60 +1,33 @@
 <!doctype html>
 <html lang="ja">
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<link rel="manifest" href="/manifest.webmanifest" />
-<title>生産実績ログ</title>
-<link rel="stylesheet" href="/src/ui.css" />
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="manifest" href="/manifest.webmanifest">
+  <title>Production Reporting</title>
+  <style>
+    body{font-family:sans-serif;margin:16px;line-height:1.5}
+    form{display:grid;gap:8px;max-width:480px}
+    input,button{font-size:16px;padding:8px}
+    .row{display:grid;grid-template-columns:140px 1fr;gap:8px;align-items:center}
+    .ok{color:green}.err{color:#b00020}
+  </style>
 </head>
 <body>
-<main>
-<section id="plan">
-<label>計画ID</label>
-<input id="planId" placeholder="スキャンまたは入力" />
-<button id="scanBtn">QR/バーコード</button>
-</section>
+  <h1>Production Reporting</h1>
+  <form id="reportForm">
+    <div class="row"><label>Plan ID</label><input id="planId" required></div>
+    <div class="row"><label>Start</label><input id="startAt" type="datetime-local" required></div>
+    <div class="row"><label>End</label><input id="endAt" type="datetime-local" required></div>
+    <div class="row"><label>Qty</label><input id="qty" type="number" min="0" step="1" value="0" required></div>
+    <div class="row"><label>Downtime (min)</label><input id="downtimeMin" type="number" min="0" step="1" value="0"></div>
+    <div class="row"><label>Operator</label><input id="operator"></div>
+    <div class="row"><label>Equipment</label><input id="equipment"></div>
+    <div class="row"><label>Device ID</label><input id="deviceId" placeholder="任意。未入力なら自動割当"></div>
+    <button type="submit">送信</button>
+    <div id="msg"></div>
+  </form>
 
-
-<section class="grid">
-<button id="startBtn" class="big">開始</button>
-<button id="endBtn" class="big">終了</button>
-<button id="pauseBtn">一時停止</button>
-</section>
-
-
-<section id="inputs">
-<label>生産数</label>
-<input id="qty" type="number" inputmode="numeric" value="1" />
-
-
-<label>ダウン理由</label>
-<select id="downReason">
-<option value="">なし</option>
-<option>段取り</option>
-<option>材料待ち</option>
-<option>機械トラブル</option>
-</select>
-
-
-<label>ダウン(分)</label>
-<input id="downMin" type="number" inputmode="numeric" value="0" />
-</section>
-
-
-<section>
-<div>未送信: <span id="pendingCount">0</span> 件</div>
-<button id="syncBtn">今すぐ同期</button>
-</section>
-</main>
-
-
-<script src="/src/db.js"></script>
-<script src="/src/app.js"></script>
-<script>
-if ("serviceWorker" in navigator) {
-navigator.serviceWorker.register("/sw.js");
-}
-</script>
+  <script src="/app.js"></script>
 </body>
 </html>
