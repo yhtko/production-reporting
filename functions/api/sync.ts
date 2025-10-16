@@ -3,6 +3,7 @@ export interface Env {
   KINTONE_BASE: string; // 例: https://xxxxx.cybozu.com
   KINTONE_LOG_APP: string; // 実績ログアプリID（数値文字列）
   KINTONE_TOKEN_LOG: string; // 実績ログAPIトークン（追加のみ）
+  KINTONE_TOKEN_LUP: string; //計画アプリAPIトークン（閲覧のみ）
 }
 
 
@@ -33,14 +34,18 @@ export interface Env {
         const endpoint = `${context.env.KINTONE_BASE}/k/v1/${hasRecord ? "record" : "records"}.json`;
         const payload = hasRecord ? { app, record: raw.record } : { app, records: raw.records };
         const payloadText = JSON.stringify(payload);
+        const tokens = [context.env.KINTONE_TOKEN_LOG, context.env.KINTONE_TOKEN_LUP]
+          .filter(Boolean)
+          .join(",");
+
         const res = await fetch(endpoint, {
-          method: 'POST',
+          method: "POST",
           headers: {
-            'Content-Type': 'application/json',
-            'X-Cybozu-API-Token': context.env.KINTONE_TOKEN_LOG,
+            "Content-Type": "application/json",
+            "X-Cybozu-API-Token": tokens,
           },
           body: payloadText,
-        });
+      });
         const kBody = await res.text();
         return new Response(JSON.stringify({
           forwarded: true,
@@ -98,11 +103,18 @@ export interface Env {
 
     const endpoint = `${context.env.KINTONE_BASE}/k/v1/records.json`;
     const payloadText = JSON.stringify({ app: context.env.KINTONE_LOG_APP, records: kintoneRecords });
+    const tokens = [context.env.KINTONE_TOKEN_LOG, context.env.KINTONE_TOKEN_LUP]
+      .filter(Boolean)
+      .join(",");
+
     const res = await fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Cybozu-API-Token": context.env.KINTONE_TOKEN_LOG },
-      body: payloadText,
-    });
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Cybozu-API-Token": tokens,
+    },
+    body: payloadText,
+  });
 
     const kBody = await res.text(); // ← kintoneの生レスポンス
     return new Response(JSON.stringify({
