@@ -6,7 +6,9 @@ export interface Env {
   KINTONE_TOKEN_LOG: string;  // 実績アプリのAPIトークン（追加権限）
   KINTONE_TOKEN_LUP?: string; // 参照元(lookup)アプリのAPIトークン（閲覧権限）
 }
-
+function safeJson(s: string) {
+  try { return JSON.parse(s); } catch { return s; }
+}
 // /records.json と /record.json を同じ形に寄せる
 type RecResp = { ids: string[]; revisions: string[] };
 function toRecResp(x: unknown): RecResp {
@@ -46,12 +48,17 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       const endpoint = `${context.env.KINTONE_BASE}/k/v1/${hasRecord ? "record" : "records"}.json`;
       const app = raw.app ?? context.env.KINTONE_LOG_APP;
       const payload = hasRecord ? { app, record: raw.record } : { app, records: raw.records };
+      const payloadText = JSON.stringify(payload);
 
       const res = await fetch(endpoint, { method: "POST", headers: jsonHeaders, body: JSON.stringify(payload) });
       if (!res.ok) {
         const err = await res.text();
-        return new Response(err, { status: res.status, headers: { "Content-Type": "application/json", ...CORS_HEADERS } });
-      }
+        return new Response(JSON.stringify({
+        error: "kintone error",
+        detail: safeJson(err),
+        sentPayloadPreview: payloadText.slice(0, 400)
+      }), { status: res.status, headers: { "Content-Type": "application/json", ...CORS_HEADERS } });
+    }
       const k = toRecResp(await res.json());
       return new Response(JSON.stringify({ ok: true, ids: k.ids, revisions: k.revisions }), {
         status: 200, headers: { "Content-Type": "application/json", ...CORS_HEADERS }
@@ -86,11 +93,15 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
 
     const endpoint = `${context.env.KINTONE_BASE}/k/v1/records.json`;
     const payload = { app: context.env.KINTONE_LOG_APP, records: kintoneRecords };
-
-    const res = await fetch(endpoint, { method: "POST", headers: jsonHeaders, body: JSON.stringify(payload) });
+    const payloadText = JSON.stringify(payload);
+    const res = await fetch(endpoint, { method: "POST", headers: jsonHeaders, body: payloadText });
     if (!res.ok) {
       const err = await res.text();
-      return new Response(err, { status: res.status, headers: { "Content-Type": "application/json", ...CORS_HEADERS } });
+      return new Response(JSON.stringify({
+        error: "kintone error",
+        detail: safeJson(err),
+        sentPayloadPreview: payloadText.slice(0, 400),
+      }), { status: res.status, headers: { "Content-Type": "application/json", ...CORS_HEADERS } });
     }
     const k = toRecResp(await res.json());
     return new Response(JSON.stringify({ ok: true, ids: k.ids, revisions: k.revisions }), {
