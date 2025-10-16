@@ -6,8 +6,29 @@ export interface Env {
   KINTONE_TOKEN_LUP: string; //計画アプリAPIトークン（閲覧のみ）
 }
 
+// kintoneの /records.json と /record.json を両対応にまとめる
+type RecResp = { ids: string[]; revisions: string[] };      // /records.json
+type OneResp = { id: string; revision: string };            // /record.json
+function toRecResp(x: unknown): RecResp {
+  const a = x as any;
+  if (a && Array.isArray(a.ids) && Array.isArray(a.revisions)) return a as RecResp;
+  if (a && typeof a.id === "string" && typeof a.revision === "string") {
+    return { ids: [a.id], revisions: [a.revision] };
+  }
+  throw new Error("unexpected kintone response");
+}
 
- export const onRequestPost: PagesFunction<Env> = async (context) => {
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "Content-Type",
+  "Access-Control-Allow-Methods": "POST,OPTIONS",
+} as const;
+
+export const onRequestOptions: PagesFunction<Env> = async () => {
+  return new Response(null, { status: 204, headers: CORS_HEADERS });
+};
+
+export const onRequestPost: PagesFunction<Env> = async (context) => {
   try {
     // 文字列でもJSONでも受ける
     let bodyText = "";
@@ -45,19 +66,16 @@ export interface Env {
             "X-Cybozu-API-Token": tokens,
           },
           body: payloadText,
+        });
+        if (!res.ok) {
+          const errText = await res.text();
+          return new Response(errText, { status: res.status, headers: { "Content-Type": "application/json", ...CORS_HEADERS } });
+        }
+        const kRaw: unknown = await res.json();
+        const k = toRecResp(kRaw);
+        return new Response(JSON.stringify({ ok: true, ids: k.ids, revisions: k.revisions }), {
+          status: 200, headers: { "Content-Type": "application/json", ...CORS_HEADERS }
       });
-        const kBody = await res.text();
-        return new Response(JSON.stringify({
-          forwarded: true,
-          endpoint,
-          app,
-          sentCount: hasRecord ? 1 : (raw.records?.length ?? 0),
-          sentPayloadPreview: payloadText.slice(0, 400),
-          kintoneStatus: res.status,
-          kintoneOk: res.ok,
-          kintoneBody: kBody
-        }), { status: res.ok ? 200 : 502, headers: { "Content-Type": "application/json" } });
-       }
     }
 
     // ---- 簡易形式として配列に正規化（{records:[…]} も配列にする／数値へ強制変換）----
@@ -108,24 +126,23 @@ export interface Env {
       .join(",");
 
     const res = await fetch(endpoint, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Cybozu-API-Token": tokens,
-    },
-    body: payloadText,
-  });
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Cybozu-API-Token": tokens,
+      },
+      body: payloadText,
+    });
 
-    const kBody = await res.text(); // ← kintoneの生レスポンス
-    return new Response(JSON.stringify({
-      forwarded: false,
-      endpoint, app: context.env.KINTONE_LOG_APP,
-      sentCount: kintoneRecords.length,
-      sentPayloadPreview: payloadText.slice(0, 400),
-      kintoneStatus: res.status,
-      kintoneOk: res.ok,
-      kintoneBody: kBody
-    }), { status: res.ok ? 200 : 502, headers: { "Content-Type": "application/json" } });
+    if (!res.ok) {
+      const errText = await res.text();
+      return new Response(errText, { status: res.status, headers: { "Content-Type": "application/json", ...CORS_HEADERS } });
+    }
+    const kRaw: unknown = await res.json();
+    const k = toRecResp(kRaw);
+    return new Response(JSON.stringify({ ok: true, ids: k.ids, revisions: k.revisions }), {
+      status: 200, headers: { "Content-Type": "application/json", ...CORS_HEADERS }
+    });
   } catch (e: any) {
     return new Response(JSON.stringify({ error: e?.message || String(e) }), { status: 400 });
   }
