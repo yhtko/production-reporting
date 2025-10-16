@@ -72,7 +72,6 @@ $('reportForm').addEventListener('submit', async (e) => {
     const downtimeMin = Number($('downtimeMin').value || 0);
     const operator = $('operator').value.trim();
     const equipment = $('equipment').value.trim();
-    const deviceId = $('deviceId').value.trim() || (navigator.userAgent || 'device');
 
     if (!planId || !startAt || !endAt) {
       msg('Plan/Start/End は必須です'); return;
@@ -81,7 +80,7 @@ $('reportForm').addEventListener('submit', async (e) => {
       msg('End は Start 以降にしてください'); return;
     }
 
-    const record = { planId, startAt, endAt, qty, downtimeMin, operator, equipment, deviceId };
+    const record = { planId, startAt, endAt, qty, downtimeMin, operator, equipment };
     console.log('POST payload', { records:[record] });
     // オンラインなら即送信、失敗したらキューへ
     if (navigator.onLine) {
