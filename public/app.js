@@ -70,8 +70,8 @@ $('reportForm').addEventListener('submit', async (e) => {
     const endAt   = toIso($('endAt').value);
     const qty = Number($('qty').value || 0);
     const downtimeMin = Number($('downtimeMin').value || 0);
-    const operator = $('operator').value.trim();
-    const equipment = $('equipment').value.trim();
+    const operator = $('operator').value.trim()|| "-";
+    const equipment = $('equipment').value.trim()|| "-";
 
     if (!planId || !startAt || !endAt) {
       msg('Plan/Start/End は必須です'); return;
