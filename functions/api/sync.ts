@@ -20,6 +20,36 @@ function toRecResp(x: unknown): RecResp {
   throw new Error("unexpected kintone response");
 }
 
+type KintoneFieldValue = { value: unknown } & Record<string, unknown>;
+type KintoneRecordLike = Record<string, KintoneFieldValue>;
+
+function isKintoneFieldValue(v: unknown): v is KintoneFieldValue {
+  return !!v && typeof v === "object" && Object.prototype.hasOwnProperty.call(v, "value");
+}
+
+function isKintoneRecordLike(record: unknown): record is KintoneRecordLike {
+  if (!record || typeof record !== "object" || Array.isArray(record)) return false;
+  const values = Object.values(record as Record<string, unknown>);
+  return values.every(isKintoneFieldValue);
+}
+
+export function isKintoneNativePayload(raw: unknown): raw is { app?: string; record?: KintoneRecordLike; records?: KintoneRecordLike[] } {
+  if (!raw || typeof raw !== "object") return false;
+
+  const maybeRecord = (raw as Record<string, unknown>).record;
+  if (maybeRecord !== undefined) {
+    if (isKintoneRecordLike(maybeRecord)) return true;
+    return false;
+  }
+
+  const maybeRecords = (raw as Record<string, unknown>).records;
+  if (Array.isArray(maybeRecords)) {
+    return maybeRecords.every(isKintoneRecordLike);
+  }
+
+  return false;
+}
+
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "Content-Type",
@@ -43,22 +73,22 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     const jsonHeaders = { "Content-Type": "application/json", "X-Cybozu-API-Token": tokens };
 
     // ---- ① kintoneネイティブ形式ならそのまま透過 ----
-    if (raw && typeof raw === "object" && ("record" in raw || "records" in raw)) {
-      const hasRecord = "record" in raw;
+    if (isKintoneNativePayload(raw)) {
+      const hasRecord = "record" in raw && raw.record !== undefined;
       const endpoint = `${context.env.KINTONE_BASE}/k/v1/${hasRecord ? "record" : "records"}.json`;
       const app = raw.app ?? context.env.KINTONE_LOG_APP;
       const payload = hasRecord ? { app, record: raw.record } : { app, records: raw.records };
       const payloadText = JSON.stringify(payload);
 
-      const res = await fetch(endpoint, { method: "POST", headers: jsonHeaders, body: JSON.stringify(payload) });
+      const res = await fetch(endpoint, { method: "POST", headers: jsonHeaders, body: payloadText });
       if (!res.ok) {
         const err = await res.text();
         return new Response(JSON.stringify({
-        error: "kintone error",
-        detail: safeJson(err),
-        sentPayloadPreview: payloadText.slice(0, 400)
-      }), { status: res.status, headers: { "Content-Type": "application/json", ...CORS_HEADERS } });
-    }
+          error: "kintone error",
+          detail: safeJson(err),
+          sentPayloadPreview: payloadText.slice(0, 400),
+        }), { status: res.status, headers: { "Content-Type": "application/json", ...CORS_HEADERS } });
+      }
       const k = toRecResp(await res.json());
       return new Response(JSON.stringify({ ok: true, ids: k.ids, revisions: k.revisions }), {
         status: 200, headers: { "Content-Type": "application/json", ...CORS_HEADERS }
