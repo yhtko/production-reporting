@@ -66,6 +66,7 @@ const equipmentOptionsList = $('equipmentOptions');
 
 let currentView = 'start';
 let selectedStartId = null;
+let manualViewPreference = null;
 
 const OPEN_STARTS_KEY = 'open-start-records';
 const FORM_META_KEY = 'kintone-form-meta';
@@ -852,10 +853,11 @@ function upsertOpenStart(info) {
   if (idx >= 0) {
     list[idx] = { ...list[idx], ...next };
   } else {
-    list.push(next);
+    list.unshift(next);
   }
   saveOpenStarts(list);
   renderActiveCards();
+  evaluateAutoView();
 }
 
 function markStartPending(recordId, pending) {
@@ -871,6 +873,7 @@ function markStartPending(recordId, pending) {
   if (changed) {
     saveOpenStarts(list);
     renderActiveCards();
+    evaluateAutoView();
   }
 }
 
@@ -884,6 +887,7 @@ function removeOpenStart(recordId) {
       hideCompletionForm();
     }
     renderActiveCards();
+    evaluateAutoView();
   }
 }
 
@@ -902,6 +906,7 @@ function mergeOpenStartsFromServer(records) {
   const stillPending = local.filter((item) => item.pendingCompletion && !merged.some((rec) => rec.recordId === item.recordId));
   saveOpenStarts([...merged, ...stillPending]);
   renderActiveCards();
+  evaluateAutoView();
 }
 
 async function refreshOpenStartsFromServer() {
@@ -968,8 +973,10 @@ function selectStartForCompletion(recordId) {
   renderActiveCards();
 }
 
-function showStartView() {
+function showStartView(options = {}) {
+  const { manual = false } = options;
   currentView = 'start';
+  manualViewPreference = manual ? 'start' : null;
   if (startView) startView.classList.remove('hidden');
   if (activeView) activeView.classList.add('hidden');
   hideCompletionForm();
@@ -980,8 +987,10 @@ function showStartView() {
   }
 }
 
-function showActiveView() {
+function showActiveView(options = {}) {
+  const { manual = false } = options;
   currentView = 'complete';
+  manualViewPreference = manual ? 'complete' : null;
   if (startView) startView.classList.add('hidden');
   if (activeView) activeView.classList.remove('hidden');
   if (planInput) {
@@ -991,9 +1000,20 @@ function showActiveView() {
   ensureDateTimeValue($('endAt'));
 }
 
+function evaluateAutoView() {
+  const list = loadOpenStarts();
+  if (list.length) {
+    if (currentView !== 'complete' && manualViewPreference !== 'start') {
+      showActiveView();
+    }
+  } else if (currentView !== 'start' && manualViewPreference !== 'complete') {
+    showStartView();
+  }
+}
+
 if (toActiveViewBtn) {
   toActiveViewBtn.addEventListener('click', () => {
-    showActiveView();
+    showActiveView({ manual: true });
     if (navigator.onLine) {
       refreshOpenStartsFromServer();
     }
@@ -1002,7 +1022,7 @@ if (toActiveViewBtn) {
 
 if (toStartViewBtn) {
   toStartViewBtn.addEventListener('click', () => {
-    showStartView();
+    showStartView({ manual: true });
     msg('');
   });
 }
@@ -1057,6 +1077,7 @@ loadCachedFormProperties();
 renderPlanSummary(null);
 renderActiveCards();
 showStartView();
+evaluateAutoView();
 ensureDateTimeValue($('endAt'));
 
 // --- 送信本体 ---
