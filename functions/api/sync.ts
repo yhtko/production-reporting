@@ -105,36 +105,109 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       return new Response(JSON.stringify({ error: "bad payload (array or {records:[]} expected)" }), { status: 400, headers: CORS_HEADERS });
     }
 
-    const asNum = (v: any) => (typeof v === "number" ? v : Number(v));
-    const kintoneRecords = arr.map((r) => ({
-      plan_id:        { value: String(r?.planId ?? "") },
-      start_at:       { value: String(r?.startAt ?? "") },
-      end_at:         { value: String(r?.endAt ?? "") },
-      quantity:       { value: asNum(r?.qty ?? 0) },
-      downtime_min:   { value: asNum(r?.downtimeMin ?? 0) },
-      downtime_reason:{ value: String(r?.downtimeReason ?? "") },
-      operator:       { value: (String(r?.operator ?? "").trim() || "-")  },
-      equipment:      { value: (String(r?.equipment ?? "") .trim() || "-") },
-    })).filter(r => r.plan_id.value && r.start_at.value && r.end_at.value);
+    const asNum = (v: any) => {
+      const n = typeof v === "number" ? v : Number(v);
+      return Number.isFinite(n) ? n : 0;
+    };
+    const startRecords: KintoneRecordLike[] = [];
+    const completionUpdates: { id: string; record: KintoneRecordLike }[] = [];
 
-    if (!kintoneRecords.length) {
+    for (const item of arr) {
+      const entryType = item?.entryType === "complete" ? "complete" : "start";
+      const planId = String(item?.planId ?? "").trim();
+      if (!planId) continue;
+
+      const equipment = (String(item?.equipment ?? "").trim() || "-");
+      const downtimeReason = String(item?.downtimeReason ?? "");
+
+      if (entryType === "complete") {
+        const startRecordId = String(item?.startRecordId ?? "").trim();
+        const endAt = String(item?.endAt ?? "").trim();
+        if (!startRecordId || !endAt) continue;
+        const qty = asNum(item?.qty ?? 0);
+        const downtime = asNum(item?.downtimeMin ?? 0);
+        if (!Number.isFinite(qty) || qty < 0) continue;
+        if (!Number.isFinite(downtime) || downtime < 0) continue;
+
+        const updateRecord: KintoneRecordLike = {
+          end_at: { value: endAt },
+          quantity: { value: qty },
+          downtime_min: { value: downtime },
+          downtime_reason: { value: downtimeReason },
+          equipment: { value: equipment },
+        };
+        completionUpdates.push({ id: startRecordId, record: updateRecord });
+        continue;
+      }
+
+      const startAt = String(item?.startAt ?? "").trim();
+      if (!startAt) continue;
+      const operator = String(item?.operator ?? "").trim();
+      if (!operator) continue;
+      const record: KintoneRecordLike = {
+        plan_id: { value: planId },
+        start_at: { value: startAt },
+        end_at: { value: String(item?.endAt ?? "") },
+        quantity: { value: asNum(item?.qty ?? 0) },
+        downtime_min: { value: asNum(item?.downtimeMin ?? 0) },
+        downtime_reason: { value: downtimeReason },
+        operator: { value: operator || "-" },
+        equipment: { value: equipment },
+      };
+      startRecords.push(record);
+    }
+
+    if (!startRecords.length && !completionUpdates.length) {
       return new Response(JSON.stringify({ error: "bad payload (required fields missing)" }), { status: 400, headers: CORS_HEADERS });
     }
 
-    const endpoint = `${context.env.KINTONE_BASE}/k/v1/records.json`;
-    const payload = { app: context.env.KINTONE_LOG_APP, records: kintoneRecords };
-    const payloadText = JSON.stringify(payload);
-    const res = await fetch(endpoint, { method: "POST", headers: jsonHeaders, body: payloadText });
-    if (!res.ok) {
-      const err = await res.text();
-      return new Response(JSON.stringify({
-        error: "kintone error",
-        detail: safeJson(err),
-        sentPayloadPreview: payloadText.slice(0, 400),
-      }), { status: res.status, headers: { "Content-Type": "application/json", ...CORS_HEADERS } });
+    const created: RecResp = { ids: [], revisions: [] };
+    if (startRecords.length) {
+      const endpoint = `${context.env.KINTONE_BASE}/k/v1/records.json`;
+      const payload = { app: context.env.KINTONE_LOG_APP, records: startRecords };
+      const payloadText = JSON.stringify(payload);
+      const res = await fetch(endpoint, { method: "POST", headers: jsonHeaders, body: payloadText });
+      if (!res.ok) {
+        const err = await res.text();
+        return new Response(JSON.stringify({
+          error: "kintone error",
+          detail: safeJson(err),
+          sentPayloadPreview: payloadText.slice(0, 400),
+        }), { status: res.status, headers: { "Content-Type": "application/json", ...CORS_HEADERS } });
+      }
+      const k = toRecResp(await res.json());
+      created.ids.push(...k.ids);
+      created.revisions.push(...k.revisions);
     }
-    const k = toRecResp(await res.json());
-    return new Response(JSON.stringify({ ok: true, ids: k.ids, revisions: k.revisions }), {
+
+    const updated: RecResp = { ids: [], revisions: [] };
+    if (completionUpdates.length) {
+      const endpoint = `${context.env.KINTONE_BASE}/k/v1/records.json`;
+      const payload = {
+        app: context.env.KINTONE_LOG_APP,
+        records: completionUpdates.map((c) => ({ id: c.id, record: c.record })),
+      };
+      const payloadText = JSON.stringify(payload);
+      const res = await fetch(endpoint, { method: "PUT", headers: jsonHeaders, body: payloadText });
+      if (!res.ok) {
+        const err = await res.text();
+        return new Response(JSON.stringify({
+          error: "kintone error",
+          detail: safeJson(err),
+          sentPayloadPreview: payloadText.slice(0, 400),
+        }), { status: res.status, headers: { "Content-Type": "application/json", ...CORS_HEADERS } });
+      }
+      const body = await res.json();
+      const records = Array.isArray(body?.records) ? body.records : [];
+      for (const rec of records) {
+        if (rec && typeof rec.id === "string" && typeof rec.revision === "string") {
+          updated.ids.push(rec.id);
+          updated.revisions.push(rec.revision);
+        }
+      }
+    }
+
+    return new Response(JSON.stringify({ ok: true, ids: created.ids, revisions: created.revisions, created, updated }), {
       status: 200, headers: { "Content-Type": "application/json", ...CORS_HEADERS }
     });
   } catch (e: any) {
