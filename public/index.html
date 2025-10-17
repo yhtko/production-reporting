@@ -25,6 +25,7 @@
       <label><input type="radio" name="entryType" value="complete"> 作業完了</label>
     </fieldset>
     <div class="row" data-modes="start,complete" data-required="true"><label>Plan ID</label><input id="planId"></div>
+    <div class="row" data-modes="complete" data-required="true"><label>開始レポート</label><select id="startLink"><option value="">選択してください</option></select></div>
     <div class="row" data-modes="start" data-required="true"><label>Start</label><input id="startAt" type="datetime-local"></div>
     <div class="row" data-modes="complete" data-required="true"><label>End</label><input id="endAt" type="datetime-local"></div>
     <div class="row" data-modes="complete" data-required="true"><label>Qty</label><input id="qty" type="number" min="0" step="1" value="0"></div>
