@@ -61,8 +61,8 @@ const equipmentInput = $('equipment');
 const equipmentOptionsList = $('equipmentOptions');
 
 const OPEN_STARTS_KEY = 'open-start-records';
-const PLAN_CACHE_KEY = 'plan-lookup-cache';
 const FORM_META_KEY = 'kintone-form-meta';
+const LOOKUP_CACHE_PREFIX = 'lookup-cache:';
 
 const getEntryMode = () => document.querySelector('input[name="entryType"]:checked')?.value || 'start';
 
@@ -128,20 +128,69 @@ function saveOpenStarts(list) {
 
 // --- kintone メタ/lookup 関連 ---
 let formProperties = {};
-let planLookupConfig = null;
-const planOptionCache = new Map();
-let lastPlanSuggestions = [];
-let planSuggestionTimer = null;
-let planSelectionToken = 0;
+const lookupStates = new Map();
+
+function createLookupState(fieldCode, input, listEl, options = {}) {
+  if (!fieldCode || !input || !listEl) return null;
+  const state = {
+    fieldCode,
+    input,
+    listEl,
+    config: null,
+    cache: new Map(),
+    cacheLoaded: false,
+    lastSuggestions: [],
+    labelLookup: new Map(),
+    suggestionTimer: null,
+    selectionToken: 0,
+    applyData: options.applyData || (() => {}),
+    afterCacheUpdate: options.afterCacheUpdate || (() => {}),
+    storageKey: options.storageKey || `${LOOKUP_CACHE_PREFIX}${fieldCode}`,
+  };
+  lookupStates.set(fieldCode, state);
+  return state;
+}
+
+const planFieldCode = planInput?.dataset.kintoneCode || 'plan_id';
+const planLookupState = createLookupState(planFieldCode, planInput, planOptionsList, {
+  afterCacheUpdate: () => renderStartOptions(),
+  storageKey: 'plan-lookup-cache',
+});
+if (planLookupState) {
+  planLookupState.applyData = (data) => {
+    if (!data) {
+      renderPlanSummary(null);
+      return;
+    }
+    if (data.values) {
+      renderPlanSummary(data);
+      applyPlanDefaults(data);
+    } else if (data.key) {
+      renderPlanSummary(data);
+    }
+  };
+}
+
+const operatorFieldCode = operatorInput?.dataset.kintoneCode || 'operator';
+const operatorLookupState = createLookupState(operatorFieldCode, operatorInput, operatorOptionsList);
+
+const equipmentFieldCode = equipmentInput?.dataset.kintoneCode || 'equipment';
+const equipmentLookupState = createLookupState(equipmentFieldCode, equipmentInput, equipmentOptionsList);
 
 function loadCachedFormProperties() {
   const cached = loadJson(FORM_META_KEY, null);
   if (cached && typeof cached === 'object' && cached.properties) {
     formProperties = cached.properties;
-    planLookupConfig = derivePlanLookup();
+    refreshLookupConfigs();
     applyFormOptions();
-    if (planLookupConfig) {
-      loadCachedPlanOptions();
+    if (planInput?.value) {
+      applyPlanSelection(planInput.value.trim(), false);
+    }
+    if (operatorInput?.value) {
+      applyLookupSelection(operatorLookupState, operatorInput.value.trim(), false);
+    }
+    if (equipmentInput?.value) {
+      applyLookupSelection(equipmentLookupState, equipmentInput.value.trim(), false);
     }
   }
 }
@@ -150,15 +199,13 @@ function persistFormProperties(full) {
   saveJson(FORM_META_KEY, full);
 }
 
-function derivePlanLookup() {
-  if (!planInput) return null;
-  const planFieldCode = planInput.dataset.kintoneCode || 'plan_id';
-  if (!formProperties || typeof formProperties !== 'object') return null;
+function deriveLookupConfig(fieldCode) {
+  if (!fieldCode || !formProperties || typeof formProperties !== 'object') return null;
   for (const key of Object.keys(formProperties)) {
     const prop = formProperties[key];
     if (!prop || prop.type !== 'LOOKUP' || !prop.lookup) continue;
     const mappings = Array.isArray(prop.lookup.fieldMappings) ? prop.lookup.fieldMappings : [];
-    if (!mappings.some((m) => m?.field === planFieldCode)) continue;
+    if (!mappings.some((m) => m?.field === fieldCode)) continue;
     const relatedApp = prop.lookup.relatedApp?.app;
     const relatedKeyField = prop.lookup.relatedKeyField;
     if (!relatedApp || !relatedKeyField) continue;
@@ -169,10 +216,112 @@ function derivePlanLookup() {
       .filter((m) => m && typeof m.field === 'string' && typeof m.relatedField === 'string')
       .map((m) => ({ field: m.field, relatedField: m.relatedField }));
     const mappedFields = fieldMappings.map((m) => m.relatedField);
-    const fieldSet = uniqueList([relatedKeyField, ...pickerFields, ...mappedFields]);
-    return { planFieldCode, relatedApp, relatedKeyField, pickerFields, fieldMappings, fieldSet };
+    const fieldSet = uniqueList([relatedKeyField, ...pickerFields, ...mappedFields, '$id']);
+    return { fieldCode, relatedApp, relatedKeyField, pickerFields, fieldMappings, fieldSet };
   }
   return null;
+}
+
+function refreshLookupConfigs() {
+  lookupStates.forEach((state) => {
+    if (!state) return;
+    state.config = deriveLookupConfig(state.fieldCode);
+    if (!state.config) {
+      state.labelLookup = new Map();
+      return;
+    }
+    if (!state.cacheLoaded) {
+      loadLookupCache(state);
+      state.cacheLoaded = true;
+    } else if (state.cache.size) {
+      const sample = Array.from(state.cache.values()).slice(0, 30);
+      renderLookupOptionList(state, sample);
+      state.afterCacheUpdate();
+    }
+    if (!state.cache.size) {
+      fetchLookupOptions(state, '');
+    }
+  });
+}
+
+function loadLookupCache(state) {
+  if (!state) return;
+  const cached = loadJson(state.storageKey, []);
+  if (!Array.isArray(cached)) return;
+  state.cache.clear();
+  cached.forEach((entry) => {
+    if (!entry || !entry.key || !entry.values) return;
+    state.cache.set(entry.key, { key: entry.key, values: entry.values });
+  });
+  if (state.cache.size) {
+    const sample = Array.from(state.cache.values()).slice(0, 30);
+    renderLookupOptionList(state, sample);
+    state.afterCacheUpdate();
+  }
+}
+
+function persistLookupCache(state) {
+  if (!state) return;
+  const items = Array.from(state.cache.entries()).map(([key, data]) => ({ key, values: data.values }));
+  saveJson(state.storageKey, items);
+}
+
+function trimLookupCache(state, limit = 200) {
+  if (!state) return;
+  while (state.cache.size > limit) {
+    const firstKey = state.cache.keys().next().value;
+    state.cache.delete(firstKey);
+  }
+}
+
+function normalizeLookupRecord(state, record) {
+  if (!state?.config || !record) return null;
+  const values = {};
+  state.config.fieldSet.forEach((code) => {
+    if (record[code] && typeof record[code] === 'object' && 'value' in record[code]) {
+      values[code] = record[code].value;
+    } else if (code === '$id' && record.$id?.value) {
+      values[code] = record.$id.value;
+    } else {
+      values[code] = '';
+    }
+  });
+  const key = values[state.config.relatedKeyField] || '';
+  return key ? { key, values } : null;
+}
+
+function lookupLabelFromData(state, data) {
+  if (!state || !data) return '';
+  if (!state.config?.pickerFields?.length) {
+    return data.key || '';
+  }
+  const fields = state.config.pickerFields;
+  const parts = fields
+    .map((code) => data.values?.[code])
+    .filter((v, idx) => typeof v === 'string' && (idx === 0 || v !== data.values?.[state.config.relatedKeyField]));
+  const display = parts.filter(Boolean).join(' / ');
+  if (!display) return data.key || '';
+  return display.includes(data.key) ? display : `${data.key} / ${display}`;
+}
+
+function renderLookupOptionList(state, list) {
+  if (!state?.listEl) return;
+  state.listEl.innerHTML = '';
+  state.labelLookup = new Map();
+  list.forEach((item) => {
+    if (!item || !item.key) return;
+    const option = document.createElement('option');
+    option.value = item.key;
+    const label = lookupLabelFromData(state, item);
+    if (label && label !== item.key) {
+      option.label = label;
+      state.labelLookup.set(label.toLowerCase(), item.key);
+      state.labelLookup.set(`${item.key} / ${label}`.toLowerCase(), item.key);
+    }
+    state.labelLookup.set(item.key.toLowerCase(), item.key);
+    state.listEl.appendChild(option);
+  });
+  state.lastSuggestions = list;
 }
 
 function populateDatalist(listEl, options) {
@@ -204,78 +353,6 @@ function applyFormOptions() {
   apply(equipmentInput, equipmentOptionsList);
 }
 
-function loadCachedPlanOptions() {
-  const cached = loadJson(PLAN_CACHE_KEY, []);
-  if (!Array.isArray(cached)) return;
-  cached.forEach((entry) => {
-    if (!entry || !entry.key || !entry.values) return;
-    planOptionCache.set(entry.key, { key: entry.key, values: entry.values });
-  });
-  if (planOptionCache.size) {
-    const sample = Array.from(planOptionCache.values()).slice(0, 30);
-    renderPlanOptionList(sample);
-    renderStartOptions();
-  }
-}
-
-function persistPlanCache() {
-  const items = Array.from(planOptionCache.entries()).map(([key, data]) => ({ key, values: data.values }));
-  saveJson(PLAN_CACHE_KEY, items);
-}
-
-function trimPlanCache(limit = 200) {
-  while (planOptionCache.size > limit) {
-    const firstKey = planOptionCache.keys().next().value;
-    planOptionCache.delete(firstKey);
-  }
-}
-
-function normalizePlanRecord(record) {
-  if (!planLookupConfig || !record) return null;
-  const values = {};
-  planLookupConfig.fieldSet.forEach((code) => {
-    if (record[code] && typeof record[code] === 'object' && 'value' in record[code]) {
-      values[code] = record[code].value;
-    } else if (code === '$id' && record.$id?.value) {
-      values[code] = record.$id.value;
-    } else {
-      values[code] = '';
-    }
-  });
-  const key = values[planLookupConfig.relatedKeyField] || '';
-  return key ? { key, values } : null;
-}
-
-function planLabelFromData(data) {
-  if (!data) return '';
-  if (!planLookupConfig || !planLookupConfig.pickerFields?.length) {
-    return data.key || '';
-  }
-  const fields = planLookupConfig.pickerFields;
-  const parts = fields
-    .map((code) => data.values?.[code])
-    .filter((v, idx) => typeof v === 'string' && (idx === 0 || v !== data.values?.[planLookupConfig.relatedKeyField]));
-  const display = parts.filter(Boolean).join(' / ');
-  if (!display) return data.key || '';
-  return display.includes(data.key) ? display : `${data.key} / ${display}`;
-}
-
-function renderPlanOptionList(list) {
-  if (!planOptionsList) return;
-  planOptionsList.innerHTML = '';
-  list.forEach((item) => {
-    if (!item || !item.key) return;
-    const option = document.createElement('option');
-    option.value = item.key;
-    const label = planLabelFromData(item);
-    if (label && label !== item.key) {
-      option.label = label;
-    }
-    planOptionsList.appendChild(option);
-  });
-  lastPlanSuggestions = list;
-}
-
 async function fetchFormProperties() {
   try {
     const res = await fetch(`${API_ENDPOINT}?type=form`);
@@ -284,22 +361,25 @@ async function fetchFormProperties() {
     if (!json || typeof json !== 'object' || !json.properties) return;
     formProperties = json.properties;
     persistFormProperties(json);
-    planLookupConfig = derivePlanLookup();
+    refreshLookupConfigs();
     applyFormOptions();
-    if (planLookupConfig && !planOptionCache.size) {
-      loadCachedPlanOptions();
+    if (planInput?.value) {
+      applyPlanSelection(planInput.value.trim(), true);
     }
-    if (planLookupConfig) {
-      fetchPlanOptions('');
+    if (operatorInput?.value) {
+      applyLookupSelection(operatorLookupState, operatorInput.value.trim(), true);
+    }
+    if (equipmentInput?.value) {
+      applyLookupSelection(equipmentLookupState, equipmentInput.value.trim(), true);
     }
   } catch (e) {
     console.warn('failed to fetch form properties', e);
   }
 }
 
-async function fetchPlanOptions(term = '') {
-  if (!planLookupConfig) return;
-  const params = new URLSearchParams({ type: 'lookup-options', field: planLookupConfig.planFieldCode });
+async function fetchLookupOptions(state, term = '') {
+  if (!state?.config) return;
+  const params = new URLSearchParams({ type: 'lookup-options', field: state.fieldCode });
   if (term) params.set('term', term);
   try {
     const res = await fetch(`${API_ENDPOINT}?${params.toString()}`);
@@ -307,52 +387,121 @@ async function fetchPlanOptions(term = '') {
     const json = await res.json();
     const records = Array.isArray(json?.records) ? json.records : [];
     const normalized = records
-      .map((rec) => normalizePlanRecord(rec))
+      .map((rec) => normalizeLookupRecord(state, rec))
       .filter((rec) => rec && rec.key);
     normalized.forEach((item) => {
-      planOptionCache.set(item.key, item);
+      state.cache.set(item.key, item);
     });
-    trimPlanCache();
-    persistPlanCache();
-    if (term) {
-      renderPlanOptionList(normalized);
-    } else if (!lastPlanSuggestions.length) {
-      renderPlanOptionList(normalized);
-    }
+    trimLookupCache(state);
+    persistLookupCache(state);
     if (normalized.length) {
-      renderStartOptions();
+      renderLookupOptionList(state, normalized);
+    } else if (!term && state.cache.size) {
+      const sample = Array.from(state.cache.values()).slice(0, 30);
+      renderLookupOptionList(state, sample);
     }
+    state.afterCacheUpdate();
   } catch (e) {
-    console.warn('failed to fetch plan options', e);
+    console.warn('failed to fetch lookup options', e);
   }
 }
 
-async function fetchPlanRecord(planId) {
-  if (!planLookupConfig || !planId) return null;
-  const params = new URLSearchParams({ type: 'lookup-record', field: planLookupConfig.planFieldCode, value: planId });
+async function fetchLookupRecord(state, value) {
+  if (!state?.config || !value) return null;
+  const params = new URLSearchParams({ type: 'lookup-record', field: state.fieldCode, value });
   try {
     const res = await fetch(`${API_ENDPOINT}?${params.toString()}`);
     if (!res.ok) throw new Error(await res.text());
     const json = await res.json();
     if (!json || typeof json !== 'object' || !json.record) return null;
-    const normalized = normalizePlanRecord(json.record);
+    const normalized = normalizeLookupRecord(state, json.record);
     if (normalized) {
-      planOptionCache.set(normalized.key, normalized);
-      trimPlanCache();
-      persistPlanCache();
-      renderStartOptions();
+      state.cache.set(normalized.key, normalized);
+      trimLookupCache(state);
+      persistLookupCache(state);
+      const sample = Array.from(state.cache.values()).slice(0, 30);
+      renderLookupOptionList(state, sample);
+      state.afterCacheUpdate();
     }
     return normalized;
   } catch (e) {
-    console.warn('failed to fetch plan record', e);
+    console.warn('failed to fetch lookup record', e);
     return null;
+  }
+}
+
+function scheduleLookupSuggestion(state, term) {
+  if (!state?.config) return;
+  if (state.suggestionTimer) clearTimeout(state.suggestionTimer);
+  state.suggestionTimer = setTimeout(() => {
+    fetchLookupOptions(state, term);
+  }, 250);
+}
+
+async function applyLookupSelection(state, rawValue, fetchIfMissing = true) {
+  if (!state || !state.input) return;
+  const valueStr = typeof rawValue === 'string' ? rawValue.trim() : String(rawValue ?? '').trim();
+  if (!valueStr) {
+    state.applyData(null);
+    return;
+  }
+  if (!state.config) {
+    state.applyData({ key: valueStr });
+    return;
+  }
+
+  const resolveMatch = (candidate) => {
+    let key = candidate;
+    let match = state.cache.get(key) || null;
+    const lower = key.toLowerCase();
+    if (!match && state.labelLookup.has(lower)) {
+      const mapped = state.labelLookup.get(lower);
+      if (mapped) {
+        key = mapped;
+        match = state.cache.get(mapped) || null;
+      }
+    }
+    if (!match && key.includes('/')) {
+      const first = key.split('/')[0].trim();
+      if (first) {
+        key = first;
+        match = state.cache.get(first) || null;
+      }
+    }
+    return { key, match };
+  };
+
+  let { key: value, match: data } = resolveMatch(valueStr);
+  if (!data && fetchIfMissing) {
+    await fetchLookupOptions(state, valueStr);
+    ({ key: value, match: data } = resolveMatch(valueStr));
+  }
+
+  state.selectionToken += 1;
+  const token = state.selectionToken;
+
+  state.input.value = value;
+
+  if (data) {
+    state.applyData(data);
+    return;
+  }
+
+  state.applyData({ key: value });
+  if (!fetchIfMissing) return;
+
+  const fetched = await fetchLookupRecord(state, value);
+  if (token !== state.selectionToken) return;
+  if (fetched) {
+    state.input.value = fetched.key;
+    state.applyData(fetched);
   }
 }
 
 function renderPlanSummary(data) {
   if (!planSummary) return;
   if (data && data.values) {
-    const label = planLabelFromData(data) || data.key;
+    const label = lookupLabelFromData(planLookupState, data) || data.key;
     planSummary.textContent = label || '-';
     return;
   }
@@ -365,49 +514,25 @@ function renderPlanSummary(data) {
 }
 
 function applyPlanDefaults(planData) {
-  if (!planLookupConfig || !planData || !planData.values) return;
+  if (!planLookupState?.config || !planData || !planData.values) return;
   if (getEntryMode() !== 'start') return;
-  planLookupConfig.fieldMappings.forEach((mapping) => {
-    if (!mapping || !mapping.field || mapping.field === planLookupConfig.planFieldCode) return;
+  planLookupState.config.fieldMappings.forEach((mapping) => {
+    if (!mapping || !mapping.field || mapping.field === planLookupState.fieldCode) return;
     const input = document.querySelector(`[data-kintone-code="${mapping.field}"]`);
     if (!input) return;
     if (input.value) return;
     const value = planData.values?.[mapping.relatedField];
     if (value === undefined || value === null || value === '') return;
     input.value = value;
+    const linkedState = lookupStates.get(mapping.field);
+    if (linkedState) {
+      applyLookupSelection(linkedState, String(value), false);
+    }
   });
 }
 
 async function applyPlanSelection(planId, fetchIfMissing = true) {
-  planSelectionToken += 1;
-  const token = planSelectionToken;
-  if (!planId) {
-    renderPlanSummary(null);
-    return;
-  }
-  let data = planOptionCache.get(planId);
-  if (data) {
-    renderPlanSummary(data);
-    applyPlanDefaults(data);
-    return;
-  }
-  renderPlanSummary({ key: planId });
-  if (fetchIfMissing) {
-    const fetched = await fetchPlanRecord(planId);
-    if (token !== planSelectionToken) return;
-    if (fetched) {
-      renderPlanSummary(fetched);
-      applyPlanDefaults(fetched);
-    }
-  }
-}
-
-function schedulePlanSuggestion(term) {
-  if (!planLookupConfig) return;
-  if (planSuggestionTimer) clearTimeout(planSuggestionTimer);
-  planSuggestionTimer = setTimeout(() => {
-    fetchPlanOptions(term);
-  }, 250);
+  await applyLookupSelection(planLookupState, planId, fetchIfMissing);
 }
 
 // --- 作業開始レコード管理 ---
@@ -423,8 +548,8 @@ function renderStartOptions() {
     const operatorLabel = item.operator ? `作業者: ${item.operator}` : '作業者: -';
     const equipmentLabel = item.equipment ? `設備: ${item.equipment}` : '設備: -';
     const planLabel = item.planId ? `Plan ${item.planId}` : 'Plan 未設定';
-    const planInfo = item.planId ? planOptionCache.get(item.planId) : null;
-    const planText = planInfo ? planLabelFromData(planInfo) : planLabel;
+    const planInfo = item.planId && planLookupState ? planLookupState.cache.get(item.planId) : null;
+    const planText = planInfo ? lookupLabelFromData(planLookupState, planInfo) : planLabel;
     opt.textContent = `${planText} / ${operatorLabel} / ${equipmentLabel} / 開始: ${ts}`;
     startLinkSelect.appendChild(opt);
   });
@@ -584,13 +709,39 @@ if (startLinkSelect) {
 if (planInput) {
   planInput.addEventListener('input', () => {
     const term = planInput.value.trim();
-    schedulePlanSuggestion(term);
+    scheduleLookupSuggestion(planLookupState, term);
   });
   planInput.addEventListener('change', () => {
     applyPlanSelection(planInput.value.trim(), true);
   });
   planInput.addEventListener('blur', () => {
     applyPlanSelection(planInput.value.trim(), true);
+  });
+}
+
+if (operatorInput) {
+  operatorInput.addEventListener('input', () => {
+    const term = operatorInput.value.trim();
+    scheduleLookupSuggestion(operatorLookupState, term);
+  });
+  operatorInput.addEventListener('change', () => {
+    applyLookupSelection(operatorLookupState, operatorInput.value.trim(), true);
+  });
+  operatorInput.addEventListener('blur', () => {
+    applyLookupSelection(operatorLookupState, operatorInput.value.trim(), true);
+  });
+}
+
+if (equipmentInput) {
+  equipmentInput.addEventListener('input', () => {
+    const term = equipmentInput.value.trim();
+    scheduleLookupSuggestion(equipmentLookupState, term);
+  });
+  equipmentInput.addEventListener('change', () => {
+    applyLookupSelection(equipmentLookupState, equipmentInput.value.trim(), true);
+  });
+  equipmentInput.addEventListener('blur', () => {
+    applyLookupSelection(equipmentLookupState, equipmentInput.value.trim(), true);
   });
 }
 
@@ -821,8 +972,10 @@ function updateStartSummary(info) {
     return;
   }
   const ts = details.startAt ? new Date(details.startAt).toLocaleString() : '開始日時未設定';
+  const planInfo = details.planId && planLookupState ? planLookupState.cache.get(details.planId) : null;
+  const planLabel = planInfo ? lookupLabelFromData(planLookupState, planInfo) : (details.planId ? `Plan ${details.planId}` : null);
   const parts = [
-    details.planId ? `Plan ${details.planId}` : null,
+    planLabel,
     details.operator ? `作業者: ${details.operator}` : null,
     details.equipment ? `設備: ${details.equipment}` : null,
     ts ? `開始: ${ts}` : null,
