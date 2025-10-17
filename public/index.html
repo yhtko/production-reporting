@@ -11,22 +11,37 @@
     input,button{font-size:16px;padding:8px}
     .row{display:grid;grid-template-columns:140px 1fr;gap:8px;align-items:center}
     .ok{color:green}.err{color:#b00020}
+    fieldset.mode{display:flex;gap:12px;align-items:center;border:1px solid #ccc;padding:8px;border-radius:6px}
+    fieldset.mode label{display:flex;align-items:center;gap:4px;font-weight:500}
+    .hidden{display:none}
   </style>
 </head>
 <body>
   <h1>Production Reporting</h1>
   <form id="reportForm">
-    <div class="row"><label>Plan ID</label><input id="planId" required></div>
-    <div class="row"><label>Start</label><input id="startAt" type="datetime-local" required></div>
-    <div class="row"><label>End</label><input id="endAt" type="datetime-local" required></div>
-    <div class="row"><label>Qty</label><input id="qty" type="number" min="0" step="1" value="0" required></div>
-    <div class="row"><label>Downtime (min)</label><input id="downtimeMin" type="number" min="0" step="1" value="0"></div>
-    <div class="row"><label>Operator</label><input id="operator"></div>
-    <div class="row"><label>Equipment</label><input id="equipment"></div>
-    <div class="row"><label>Device ID</label><input id="deviceId" placeholder="任意。未入力なら自動割当"></div>
+    <fieldset class="mode">
+      <legend>入力内容</legend>
+      <label><input type="radio" name="entryType" value="start" checked> 作業開始</label>
+      <label><input type="radio" name="entryType" value="complete"> 作業完了</label>
+    </fieldset>
+    <div class="row" data-modes="start" data-required="true"><label>Plan ID</label><input id="planId" data-kintone-code="plan_id" list="planOptions" autocomplete="off"></div>
+    <div class="row" data-modes="start"><label>Plan情報</label><div id="planSummary">-</div></div>
+    <div class="row" data-modes="complete" data-required="true"><label>開始レポート</label><select id="startLink"><option value="">選択してください</option></select></div>
+    <div class="row" data-modes="complete"><label>開始情報</label><div id="startSummary">未選択</div></div>
+    <div class="row" data-modes="start" data-required="true"><label>Start</label><input id="startAt" type="datetime-local"></div>
+    <div class="row" data-modes="complete" data-required="true"><label>End</label><input id="endAt" type="datetime-local"></div>
+    <div class="row" data-modes="complete" data-required="true"><label>Qty</label><input id="qty" type="number" min="0" step="1" value="0"></div>
+    <div class="row" data-modes="complete" data-required="true"><label>Downtime (min)</label><input id="downtimeMin" type="number" min="0" step="1" value="0"></div>
+    <div class="row" data-modes="start" data-required="true"><label>Operator</label><input id="operator" data-kintone-code="operator" list="operatorOptions" autocomplete="off"></div>
+    <div class="row" data-modes="start" data-required="true"><label>Equipment</label><input id="equipment" data-kintone-code="equipment" list="equipmentOptions" autocomplete="off"></div>
+    <div class="row" data-modes="start,complete"><label>Device ID</label><input id="deviceId" placeholder="任意。未入力なら自動割当"></div>
     <button type="submit">送信</button>
     <div id="msg"></div>
   </form>
+
+  <datalist id="planOptions"></datalist>
+  <datalist id="operatorOptions"></datalist>
+  <datalist id="equipmentOptions"></datalist>
 
   <script src="/app.js"></script>
 </body>
