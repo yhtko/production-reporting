@@ -54,8 +54,189 @@ export function isKintoneNativePayload(raw: unknown): raw is { app?: string; rec
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "Content-Type",
-  "Access-Control-Allow-Methods": "POST,OPTIONS",
+  "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
 } as const;
+
+const JSON_CORS_HEADERS = { "Content-Type": "application/json", ...CORS_HEADERS } as const;
+
+type RequestContext = Parameters<PagesFunction<Env>>[0];
+
+type FormProperties = Record<string, any> & {
+  properties?: Record<string, any>;
+};
+
+async function fetchFormDefinition(context: RequestContext): Promise<FormProperties> {
+  const endpoint = `${context.env.KINTONE_BASE}/k/v1/app/form/fields.json?app=${encodeURIComponent(context.env.KINTONE_LOG_APP)}`;
+  const headers = buildKintoneHeaders(context.env);
+  const res = await fetch(endpoint, { method: "GET", headers });
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Response(JSON.stringify({
+      error: "kintone error",
+      detail: safeJson(detail),
+    }), { status: res.status, headers: JSON_CORS_HEADERS });
+  }
+  const json = await res.json();
+  if (!json || typeof json !== "object" || !json.properties) {
+    throw new Response(JSON.stringify({ error: "unexpected form definition" }), { status: 500, headers: JSON_CORS_HEADERS });
+  }
+  return json;
+}
+
+function buildKintoneHeaders(env: Env, primaryToken?: string) {
+  const tokens = [primaryToken ?? env.KINTONE_TOKEN_LOG, env.KINTONE_TOKEN_LUP]
+    .filter(Boolean)
+    .join(",");
+  return {
+    "Content-Type": "application/json",
+    "X-Cybozu-API-Token": tokens,
+  } as Record<string, string>;
+}
+
+function encodeFields(params: URLSearchParams, fields: string[]) {
+  fields.forEach((field, idx) => {
+    params.append(`fields[${idx}]`, field);
+  });
+}
+
+function escapeKintoneValue(value: string) {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+function unique<T>(arr: Iterable<T>): T[] {
+  const seen = new Set<T>();
+  const result: T[] = [];
+  for (const item of arr) {
+    if (seen.has(item)) continue;
+    seen.add(item);
+    result.push(item);
+  }
+  return result;
+}
+
+export const onRequestGet: PagesFunction<Env> = async (context) => {
+  try {
+    const url = new URL(context.request.url);
+    const type = url.searchParams.get("type");
+    if (!type) {
+      return new Response(JSON.stringify({ error: "missing type" }), { status: 400, headers: JSON_CORS_HEADERS });
+    }
+
+    if (type === "form") {
+      try {
+        const body = await fetchFormDefinition(context);
+        return new Response(JSON.stringify(body), { status: 200, headers: JSON_CORS_HEADERS });
+      } catch (err) {
+        if (err instanceof Response) return err;
+        return new Response(JSON.stringify({ error: (err as Error).message || String(err) }), { status: 500, headers: JSON_CORS_HEADERS });
+      }
+    }
+
+    const formDef = await fetchFormDefinition(context);
+    const properties = formDef.properties as Record<string, any>;
+
+    if (type === "open-starts") {
+      const fields = ["plan_id", "start_at", "operator", "equipment", "end_at", "$id"];
+      const params = new URLSearchParams();
+      params.set("app", context.env.KINTONE_LOG_APP);
+      params.set("query", "end_at = \"\" order by start_at asc");
+      encodeFields(params, fields);
+      params.set("size", "500");
+      const endpoint = `${context.env.KINTONE_BASE}/k/v1/records.json?${params.toString()}`;
+      const res = await fetch(endpoint, { method: "GET", headers: buildKintoneHeaders(context.env) });
+      if (!res.ok) {
+        const detail = await res.text();
+        return new Response(JSON.stringify({ error: "kintone error", detail: safeJson(detail) }), { status: res.status, headers: JSON_CORS_HEADERS });
+      }
+      const json = await res.json();
+      const records = Array.isArray(json?.records) ? json.records : [];
+      const simplified = records.map((rec: any) => ({
+        recordId: rec?.$id?.value ?? "",
+        planId: rec?.plan_id?.value ?? "",
+        startAt: rec?.start_at?.value ?? "",
+        operator: rec?.operator?.value ?? "",
+        equipment: rec?.equipment?.value ?? "",
+      }));
+      return new Response(JSON.stringify({ records: simplified }), { status: 200, headers: JSON_CORS_HEADERS });
+    }
+
+    const planFieldCode = url.searchParams.get("field") ?? "";
+    const term = url.searchParams.get("term") ?? "";
+    if (!planFieldCode) {
+      return new Response(JSON.stringify({ error: "missing field" }), { status: 400, headers: JSON_CORS_HEADERS });
+    }
+
+    const lookupEntry = Object.values(properties).find((prop: any) => {
+      if (!prop || prop.type !== "LOOKUP") return false;
+      const mappings = Array.isArray(prop.lookup?.fieldMappings) ? prop.lookup.fieldMappings : [];
+      return mappings.some((m: any) => m?.field === planFieldCode);
+    });
+
+    if (!lookupEntry) {
+      return new Response(JSON.stringify({ error: "lookup not configured for field" }), { status: 404, headers: JSON_CORS_HEADERS });
+    }
+
+    const lookup = lookupEntry.lookup;
+    const relatedApp = lookup?.relatedApp?.app;
+    const relatedKeyField = lookup?.relatedKeyField;
+    if (!relatedApp || !relatedKeyField) {
+      return new Response(JSON.stringify({ error: "lookup definition incomplete" }), { status: 500, headers: JSON_CORS_HEADERS });
+    }
+
+    const pickerFields: string[] = Array.isArray(lookup?.lookupPickerFields) ? lookup.lookupPickerFields.filter((v: any) => typeof v === "string") : [];
+    const mappingFields: string[] = Array.isArray(lookup?.fieldMappings) ? lookup.fieldMappings.map((m: any) => m?.relatedField).filter((v: any) => typeof v === "string") : [];
+    const fieldSet = unique([relatedKeyField, ...pickerFields, ...mappingFields]);
+
+    if (type === "lookup-record") {
+      const value = url.searchParams.get("value") ?? "";
+      if (!value) {
+        return new Response(JSON.stringify({ error: "missing value" }), { status: 400, headers: JSON_CORS_HEADERS });
+      }
+      const params = new URLSearchParams();
+      params.set("app", relatedApp);
+      const query = `${relatedKeyField} = "${escapeKintoneValue(value)}" limit 1`;
+      params.set("query", query);
+      encodeFields(params, fieldSet);
+      const endpoint = `${context.env.KINTONE_BASE}/k/v1/records.json?${params.toString()}`;
+      const res = await fetch(endpoint, { method: "GET", headers: buildKintoneHeaders(context.env) });
+      if (!res.ok) {
+        const detail = await res.text();
+        return new Response(JSON.stringify({ error: "kintone error", detail: safeJson(detail) }), { status: res.status, headers: JSON_CORS_HEADERS });
+      }
+      const json = await res.json();
+      const rec = Array.isArray(json?.records) ? json.records[0] : undefined;
+      return new Response(JSON.stringify({ record: rec ?? null }), { status: 200, headers: JSON_CORS_HEADERS });
+    }
+
+    if (type === "lookup-options") {
+      const params = new URLSearchParams();
+      params.set("app", relatedApp);
+      let query = "";
+      if (term) {
+        const escapedTerm = escapeKintoneValue(term);
+        const clauses = unique([relatedKeyField, ...pickerFields]).map((field) => `${field} like "${escapedTerm}"`);
+        query = `${clauses.join(" or ")} order by ${relatedKeyField} asc limit 30`;
+      } else {
+        query = `order by ${relatedKeyField} asc limit 30`;
+      }
+      params.set("query", query);
+      encodeFields(params, fieldSet);
+      const endpoint = `${context.env.KINTONE_BASE}/k/v1/records.json?${params.toString()}`;
+      const res = await fetch(endpoint, { method: "GET", headers: buildKintoneHeaders(context.env) });
+      if (!res.ok) {
+        const detail = await res.text();
+        return new Response(JSON.stringify({ error: "kintone error", detail: safeJson(detail) }), { status: res.status, headers: JSON_CORS_HEADERS });
+      }
+      const json = await res.json();
+      return new Response(JSON.stringify({ records: json?.records ?? [] }), { status: 200, headers: JSON_CORS_HEADERS });
+    }
+
+    return new Response(JSON.stringify({ error: "unsupported type" }), { status: 400, headers: JSON_CORS_HEADERS });
+  } catch (err) {
+    if (err instanceof Response) return err;
+    return new Response(JSON.stringify({ error: (err as Error).message || String(err) }), { status: 500, headers: JSON_CORS_HEADERS });
+  }
+};
 
 export const onRequestOptions: PagesFunction<Env> = async () =>
   new Response(null, { status: 204, headers: CORS_HEADERS });
@@ -70,14 +251,8 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     catch { return new Response(JSON.stringify({ error: "bad payload (not json)" }), { status: 400, headers: CORS_HEADERS }); }
 
     // 共通ヘッダー（複数トークンをカンマ連結）
-    const makeHeaders = (primaryToken: string | undefined) => {
-      const tokens = [primaryToken ?? context.env.KINTONE_TOKEN_LOG, context.env.KINTONE_TOKEN_LUP]
-        .filter(Boolean)
-        .join(",");
-      return { "Content-Type": "application/json", "X-Cybozu-API-Token": tokens };
-    };
-    const createHeaders = makeHeaders(context.env.KINTONE_TOKEN_LOG);
-    const updateHeaders = makeHeaders(context.env.KINTONE_TOKEN_LOG_UPDATE);
+    const createHeaders = buildKintoneHeaders(context.env, context.env.KINTONE_TOKEN_LOG);
+    const updateHeaders = buildKintoneHeaders(context.env, context.env.KINTONE_TOKEN_LOG_UPDATE);
 
     // ---- ① kintoneネイティブ形式ならそのまま透過 ----
     if (isKintoneNativePayload(raw)) {
