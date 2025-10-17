@@ -1,4 +1,4 @@
-(() => {
+(function () {
 const API_ENDPOINT = 'https://production-reporting.pages.dev/api/sync';
 
 // --- 簡易IndexedDB（キュー用）---
@@ -1343,6 +1343,22 @@ async function flushQueue() {
       });
     }
   }
+});
+
+// --- 初期ロードでサーバ同期を試行 ---
+if (navigator.onLine) {
+  refreshOpenStartsFromServer();
+  fetchFormProperties();
+  flushQueue();
+}
+
+window.addEventListener('online', () => {
+  flushQueue();
+  refreshOpenStartsFromServer();
+  fetchFormProperties();
+  if (planInput?.value) {
+    applyPlanSelection(planInput.value.trim(), true);
+  }
   scheduleOpenStartHydration();
 });
 
@@ -1417,4 +1433,4 @@ window.addEventListener('offline', () => {
 });
 
 }
-})();
+}());
