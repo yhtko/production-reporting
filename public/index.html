@@ -6,38 +6,68 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <title>Production Reporting</title>
   <style>
-    body{font-family:sans-serif;margin:16px;line-height:1.5}
-    form{display:grid;gap:8px;max-width:480px}
+    body{font-family:sans-serif;margin:16px;line-height:1.5;background:#fafafa}
+    form{display:grid;gap:12px;max-width:520px;background:#fff;padding:16px;border-radius:12px;box-shadow:0 2px 6px rgba(0,0,0,0.05)}
     input,button{font-size:16px;padding:8px}
-    .row{display:grid;grid-template-columns:140px 1fr;gap:8px;align-items:center}
-    .ok{color:green}.err{color:#b00020}
-    fieldset.mode{display:flex;gap:12px;align-items:center;border:1px solid #ccc;padding:8px;border-radius:6px}
-    fieldset.mode label{display:flex;align-items:center;gap:4px;font-weight:500}
+    button{cursor:pointer}
+    .row{display:grid;grid-template-columns:140px 1fr;gap:12px;align-items:center}
+    .ok{color:#1976d2}
+    .err{color:#b00020}
     .hidden{display:none}
+    .view{margin-top:16px}
+    .actions{display:flex;gap:12px;flex-wrap:wrap;margin-top:12px}
+    .actions button{flex:1 1 auto}
+    .cards{display:grid;gap:12px;margin:16px 0;max-width:520px}
+    .card{display:block;width:100%;background:#fff;border:1px solid #ccc;border-radius:12px;padding:12px;text-align:left;box-shadow:0 1px 3px rgba(0,0,0,0.05);color:#222}
+    .card h3{margin:0 0 8px 0;font-size:18px}
+    .card p{margin:4px 0;font-size:14px;color:#444}
+    .card .status{color:#b00020;font-weight:600}
+    .card.pending{border-style:dashed}
+    .card.selected{border-color:#1976d2;box-shadow:0 0 0 2px rgba(25,118,210,0.2)}
+    .card:focus-visible{outline:3px solid rgba(25,118,210,0.4)}
+    .summary{background:#eef5ff;padding:12px;border-radius:8px;font-size:14px;color:#123}
   </style>
 </head>
 <body>
   <h1>Production Reporting</h1>
-  <form id="reportForm">
-    <fieldset class="mode">
-      <legend>入力内容</legend>
-      <label><input type="radio" name="entryType" value="start" checked> 作業開始</label>
-      <label><input type="radio" name="entryType" value="complete"> 作業完了</label>
-    </fieldset>
-    <div class="row" data-modes="start" data-required="true"><label>Plan ID</label><input id="planId" data-kintone-code="plan_id" list="planOptions" autocomplete="off"></div>
-    <div class="row" data-modes="start"><label>Plan情報</label><div id="planSummary">-</div></div>
-    <div class="row" data-modes="complete" data-required="true"><label>開始レポート</label><select id="startLink"><option value="">選択してください</option></select></div>
-    <div class="row" data-modes="complete"><label>開始情報</label><div id="startSummary">未選択</div></div>
-    <div class="row" data-modes="start" data-required="true"><label>Start</label><input id="startAt" type="datetime-local"></div>
-    <div class="row" data-modes="complete" data-required="true"><label>End</label><input id="endAt" type="datetime-local"></div>
-    <div class="row" data-modes="complete" data-required="true"><label>Qty</label><input id="qty" type="number" min="0" step="1" value="0"></div>
-    <div class="row" data-modes="complete" data-required="true"><label>Downtime (min)</label><input id="downtimeMin" type="number" min="0" step="1" value="0"></div>
-    <div class="row" data-modes="start" data-required="true"><label>Operator</label><input id="operator" data-kintone-code="operator" list="operatorOptions" autocomplete="off"></div>
-    <div class="row" data-modes="start" data-required="true"><label>Equipment</label><input id="equipment" data-kintone-code="equipment" list="equipmentOptions" autocomplete="off"></div>
-    <div class="row" data-modes="start,complete"><label>Device ID</label><input id="deviceId" placeholder="任意。未入力なら自動割当"></div>
-    <button type="submit">送信</button>
-    <div id="msg"></div>
-  </form>
+  <div id="msg"></div>
+
+  <section id="startView" class="view">
+    <h2>作業開始</h2>
+    <form id="startForm">
+      <div class="row"><label>Plan ID</label><input id="planId" data-kintone-code="plan_id" list="planOptions" autocomplete="off"></div>
+      <div class="row"><label>Plan情報</label><div id="planSummary">-</div></div>
+      <div class="row"><label>開始日時</label><input id="startAt" type="datetime-local"></div>
+      <div class="row"><label>作業者</label><input id="operator" data-kintone-code="operator" list="operatorOptions" autocomplete="off"></div>
+      <div class="row"><label>設備</label><input id="equipment" data-kintone-code="equipment" list="equipmentOptions" autocomplete="off"></div>
+      <div class="row"><label>Device ID</label><input id="deviceId" placeholder="任意。未入力なら自動割当"></div>
+      <div class="actions">
+        <button type="submit">作業開始を登録</button>
+        <button type="button" id="toActiveView">作業中一覧を見る</button>
+      </div>
+    </form>
+  </section>
+
+  <section id="activeView" class="view hidden">
+    <div class="actions">
+      <button type="button" id="toStartView">新しい作業開始</button>
+      <button type="button" id="refreshActive">再読み込み</button>
+    </div>
+    <h2>作業中一覧</h2>
+    <div id="activeCards" class="cards"></div>
+    <form id="completeForm" class="hidden">
+      <h3>作業完了入力</h3>
+      <div id="completionSummary" class="summary">作業中カードを選択してください</div>
+      <div class="row"><label>完了日時</label><input id="endAt" type="datetime-local"></div>
+      <div class="row"><label>個数</label><input id="qty" type="number" min="0" step="1" value="0"></div>
+      <div class="row"><label>ダウンタイム (分)</label><input id="downtimeMin" type="number" min="0" step="1" value="0"></div>
+      <button type="submit">作業完了を登録</button>
+    </form>
+  </section>
+
+  <datalist id="planOptions"></datalist>
+  <datalist id="operatorOptions"></datalist>
+  <datalist id="equipmentOptions"></datalist>
 
   <datalist id="planOptions"></datalist>
   <datalist id="operatorOptions"></datalist>

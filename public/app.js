@@ -40,18 +40,22 @@ async function allAndClear() {
 
 // --- ユーティリティ ---
 const $ = (id) => document.getElementById(id);
+const msgContainer = $('msg');
 const msg = (t, ok = false) => {
-  const m = $('msg');
-  if (!m) return;
-  m.textContent = t;
-  m.className = ok ? 'ok' : 'err';
+  if (!msgContainer) return;
+  msgContainer.textContent = t;
+  msgContainer.className = t ? (ok ? 'ok' : 'err') : '';
 };
 
-const form = $('reportForm');
-const entryModeInputs = Array.from(document.querySelectorAll('input[name="entryType"]'));
-const formRows = Array.from(document.querySelectorAll('#reportForm .row'));
-const startLinkSelect = $('startLink');
-const startSummary = $('startSummary');
+const startView = $('startView');
+const activeView = $('activeView');
+const startForm = $('startForm');
+const completeForm = $('completeForm');
+const activeCardsContainer = $('activeCards');
+const completionSummary = $('completionSummary');
+const toActiveViewBtn = $('toActiveView');
+const toStartViewBtn = $('toStartView');
+const refreshActiveBtn = $('refreshActive');
 const planSummary = $('planSummary');
 const planInput = $('planId');
 const planOptionsList = $('planOptions');
@@ -60,11 +64,14 @@ const operatorOptionsList = $('operatorOptions');
 const equipmentInput = $('equipment');
 const equipmentOptionsList = $('equipmentOptions');
 
+let currentView = 'start';
+let selectedStartId = null;
+
 const OPEN_STARTS_KEY = 'open-start-records';
 const FORM_META_KEY = 'kintone-form-meta';
 const LOOKUP_CACHE_PREFIX = 'lookup-cache:';
 
-const getEntryMode = () => document.querySelector('input[name="entryType"]:checked')?.value || 'start';
+const getEntryMode = () => (currentView === 'start' ? 'start' : 'complete');
 
 function currentLocalDateTimeValue() {
   const now = new Date();
@@ -84,6 +91,13 @@ function ensureDateTimeValue(input) {
 function setDateTimeToNow(input) {
   if (!input) return;
   input.value = currentLocalDateTimeValue();
+}
+
+function toISOStringValue(localValue) {
+  if (!localValue) return '';
+  const d = new Date(localValue);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toISOString();
 }
 
 function uniqueList(items) {
@@ -276,7 +290,7 @@ function createLookupState(fieldCode, input, listEl, options = {}) {
 
 const planFieldCode = planInput?.dataset.kintoneCode || 'plan_id';
 const planLookupState = createLookupState(planFieldCode, planInput, planOptionsList, {
-  afterCacheUpdate: () => renderStartOptions(),
+  afterCacheUpdate: () => renderActiveCards(),
   storageKey: 'plan-lookup-cache',
 });
 if (planLookupState) {
@@ -764,40 +778,70 @@ async function hydrateOpenStartLookups(records) {
   try {
     const results = await Promise.all(tasks);
     if (results.some(Boolean)) {
-      renderStartOptions();
-      updateStartSummary();
+      renderActiveCards();
+      updateCompletionSummary();
     }
   } catch (e) {
     console.warn('failed to hydrate open start lookups', e);
   }
 }
 
-function renderStartOptions() {
-  if (!startLinkSelect) return;
-  const prev = startLinkSelect.value;
-  startLinkSelect.innerHTML = '<option value="">選択してください</option>';
-  const list = loadOpenStarts().filter((item) => !item.pendingCompletion);
-  list.forEach((item) => {
-    const opt = document.createElement('option');
-    opt.value = item.recordId;
-    const ts = item.startAt ? new Date(item.startAt).toLocaleString() : '開始日時未設定';
-    const operatorDisplay = item.operator ? describeLookupValue(operatorLookupState, item.operator) : '';
-    const operatorLabel = operatorDisplay ? `作業者: ${operatorDisplay}` : '作業者: -';
-    const equipmentDisplay = item.equipment ? describeLookupValue(equipmentLookupState, item.equipment) : '';
-    const equipmentLabel = equipmentDisplay ? `設備: ${equipmentDisplay}` : '設備: -';
-    const planLabel = item.planId ? `Plan ${item.planId}` : 'Plan 未設定';
-    const planInfo = item.planId && planLookupState ? planLookupState.cache.get(item.planId) : null;
-    const planText = planInfo ? lookupLabelFromData(planLookupState, planInfo) : planLabel;
-    opt.textContent = `${planText} / ${operatorLabel} / ${equipmentLabel} / 開始: ${ts}`;
-    startLinkSelect.appendChild(opt);
+function createCardElement(item) {
+  const card = document.createElement('button');
+  card.type = 'button';
+  card.className = 'card';
+  if (item.pendingCompletion) card.classList.add('pending');
+  if (item.recordId === selectedStartId) card.classList.add('selected');
+
+  const planInfo = item.planId && planLookupState ? planLookupState.cache.get(item.planId) : null;
+  const planLabel = planInfo ? lookupLabelFromData(planLookupState, planInfo) : (item.planId ? `Plan ${item.planId}` : 'Plan 未設定');
+  const operatorDisplay = item.operator ? describeLookupValue(operatorLookupState, item.operator) : '';
+  const equipmentDisplay = item.equipment ? describeLookupValue(equipmentLookupState, item.equipment) : '';
+  const startLabel = item.startAt ? new Date(item.startAt).toLocaleString() : '開始日時未設定';
+
+  card.innerHTML = `
+    <h3>${planLabel}</h3>
+    <p>${operatorDisplay ? `作業者: ${operatorDisplay}` : '作業者: -'}</p>
+    <p>${equipmentDisplay ? `設備: ${equipmentDisplay}` : '設備: -'}</p>
+    <p>開始: ${startLabel}</p>
+    ${item.pendingCompletion ? '<p class="status">送信待ち</p>' : ''}
+  `;
+
+  card.addEventListener('click', () => {
+    selectStartForCompletion(item.recordId);
   });
-  if (list.some((item) => item.recordId === prev)) {
-    startLinkSelect.value = prev;
-  } else {
-    startLinkSelect.value = '';
+
+  return card;
+}
+
+function renderActiveCards() {
+  if (!activeCardsContainer) return;
+  const list = loadOpenStarts();
+  activeCardsContainer.innerHTML = '';
+
+  if (!list.length) {
+    const empty = document.createElement('p');
+    empty.textContent = '作業中のカードはありません';
+    activeCardsContainer.appendChild(empty);
+    hideCompletionForm();
+    return;
   }
-  updateStartSummary();
-  syncPlanIdWithSelection();
+
+  list.forEach((item) => {
+    const card = createCardElement(item);
+    activeCardsContainer.appendChild(card);
+  });
+
+  if (selectedStartId) {
+    const found = list.find((item) => item.recordId === selectedStartId);
+    if (found) {
+      updateCompletionSummary(found);
+      if (completeForm) completeForm.classList.remove('hidden');
+    } else {
+      hideCompletionForm();
+    }
+  }
+
   scheduleOpenStartHydration();
 }
 
@@ -811,7 +855,7 @@ function upsertOpenStart(info) {
     list.push(next);
   }
   saveOpenStarts(list);
-  renderStartOptions();
+  renderActiveCards();
 }
 
 function markStartPending(recordId, pending) {
@@ -826,7 +870,7 @@ function markStartPending(recordId, pending) {
   });
   if (changed) {
     saveOpenStarts(list);
-    renderStartOptions();
+    renderActiveCards();
   }
 }
 
@@ -836,7 +880,10 @@ function removeOpenStart(recordId) {
   const next = list.filter((item) => item.recordId !== recordId);
   if (next.length !== list.length) {
     saveOpenStarts(next);
-    renderStartOptions();
+    if (selectedStartId === recordId) {
+      hideCompletionForm();
+    }
+    renderActiveCards();
   }
 }
 
@@ -854,7 +901,7 @@ function mergeOpenStartsFromServer(records) {
   }));
   const stillPending = local.filter((item) => item.pendingCompletion && !merged.some((rec) => rec.recordId === item.recordId));
   saveOpenStarts([...merged, ...stillPending]);
-  renderStartOptions();
+  renderActiveCards();
 }
 
 async function refreshOpenStartsFromServer() {
@@ -870,78 +917,100 @@ async function refreshOpenStartsFromServer() {
 }
 
 function syncPlanIdWithSelection() {
-  if (!startLinkSelect || !planInput) return;
-  const selected = startLinkSelect.value;
-  if (!selected) {
-    if (getEntryMode() === 'complete') {
-      planInput.value = '';
-    }
-    if (getEntryMode() === 'start') {
-      applyPlanSelection(planInput.value.trim(), false);
-    }
-    updateStartSummary();
+function hideCompletionForm() {
+  selectedStartId = null;
+  if (completeForm) completeForm.classList.add('hidden');
+  if (completionSummary) completionSummary.textContent = '作業中カードを選択してください';
+}
+
+function updateCompletionSummary(info) {
+  if (!completionSummary) return;
+  const details = info || (selectedStartId ? loadOpenStarts().find((item) => item.recordId === selectedStartId) : null);
+  if (!details) {
+    completionSummary.textContent = '作業中カードを選択してください';
+    return;
+  }
+  const ts = details.startAt ? new Date(details.startAt).toLocaleString() : '開始日時未設定';
+  const planInfo = details.planId && planLookupState ? planLookupState.cache.get(details.planId) : null;
+  const planLabel = planInfo ? lookupLabelFromData(planLookupState, planInfo) : (details.planId ? `Plan ${details.planId}` : 'Plan 未設定');
+  const operatorDisplay = details.operator ? describeLookupValue(operatorLookupState, details.operator) : '';
+  const equipmentDisplay = details.equipment ? describeLookupValue(equipmentLookupState, details.equipment) : '';
+  const parts = [
+    planLabel,
+    operatorDisplay ? `作業者: ${operatorDisplay}` : null,
+    equipmentDisplay ? `設備: ${equipmentDisplay}` : null,
+    ts ? `開始: ${ts}` : null,
+  ].filter(Boolean);
+  completionSummary.textContent = parts.join(' / ') || '作業中カードを選択してください';
+}
+
+function selectStartForCompletion(recordId) {
+  if (!recordId) {
+    hideCompletionForm();
+    renderActiveCards();
     return;
   }
   const list = loadOpenStarts();
-  const found = list.find((item) => item.recordId === selected);
-  if (found) {
-    if (getEntryMode() === 'complete') {
-      planInput.value = found.planId || '';
-    }
-    updateStartSummary(found);
-    applyPlanSelection(found.planId || '', true);
-  } else {
-    updateStartSummary();
+  const found = list.find((item) => item.recordId === recordId);
+  if (!found) {
+    hideCompletionForm();
+    renderActiveCards();
+    return;
   }
+  selectedStartId = recordId;
+  updateCompletionSummary(found);
+  if (completeForm) completeForm.classList.remove('hidden');
+  setDateTimeToNow($('endAt'));
+  const qtyInput = $('qty');
+  const downtimeInput = $('downtimeMin');
+  if (qtyInput && !qtyInput.value) qtyInput.value = '0';
+  if (downtimeInput && !downtimeInput.value) downtimeInput.value = '0';
+  renderActiveCards();
 }
 
-function applyEntryMode(mode) {
-  formRows.forEach((row) => {
-    const modes = (row.dataset.modes || '')
-      .split(',')
-      .map((m) => m.trim())
-      .filter(Boolean);
-    const shouldShow = !modes.length || modes.includes(mode);
-    row.classList.toggle('hidden', !shouldShow);
-    const control = row.querySelector('input, select, textarea');
-    if (!control) return;
-    control.disabled = !shouldShow;
-    if (shouldShow && row.dataset.required === 'true') {
-      control.setAttribute('required', '');
-    } else {
-      control.removeAttribute('required');
-    }
-    if (!shouldShow) {
-      if (control.type === 'number') {
-        control.value = control.defaultValue ?? '';
-      } else if (control.type === 'datetime-local') {
-        control.value = '';
-      } else if (control instanceof HTMLSelectElement) {
-        control.value = '';
-      }
-    }
-  });
-
-  if (!planInput) return;
-  if (mode === 'complete') {
-    planInput.setAttribute('readonly', 'readonly');
-    syncPlanIdWithSelection();
-    ensureDateTimeValue($('endAt'));
-  } else {
+function showStartView() {
+  currentView = 'start';
+  if (startView) startView.classList.remove('hidden');
+  if (activeView) activeView.classList.add('hidden');
+  hideCompletionForm();
+  ensureDateTimeValue($('startAt'));
+  if (planInput) {
     planInput.removeAttribute('readonly');
-    ensureDateTimeValue($('startAt'));
     applyPlanSelection(planInput.value.trim(), false);
   }
-  renderStartOptions();
 }
 
-entryModeInputs.forEach((input) => {
-  input.addEventListener('change', () => applyEntryMode(input.value));
-});
+function showActiveView() {
+  currentView = 'complete';
+  if (startView) startView.classList.add('hidden');
+  if (activeView) activeView.classList.remove('hidden');
+  if (planInput) {
+    planInput.setAttribute('readonly', 'readonly');
+  }
+  renderActiveCards();
+  ensureDateTimeValue($('endAt'));
+}
 
-if (startLinkSelect) {
-  startLinkSelect.addEventListener('change', () => {
-    syncPlanIdWithSelection();
+if (toActiveViewBtn) {
+  toActiveViewBtn.addEventListener('click', () => {
+    showActiveView();
+    if (navigator.onLine) {
+      refreshOpenStartsFromServer();
+    }
+  });
+}
+
+if (toStartViewBtn) {
+  toStartViewBtn.addEventListener('click', () => {
+    showStartView();
+    msg('');
+  });
+}
+
+if (refreshActiveBtn) {
+  refreshActiveBtn.addEventListener('click', () => {
+    refreshOpenStartsFromServer();
+    renderActiveCards();
   });
 }
 
@@ -986,9 +1055,8 @@ if (equipmentInput) {
 
 loadCachedFormProperties();
 renderPlanSummary(null);
-renderStartOptions();
-applyEntryMode(getEntryMode());
-ensureDateTimeValue($('startAt'));
+renderActiveCards();
+showStartView();
 ensureDateTimeValue($('endAt'));
 
 // --- 送信本体 ---
@@ -1053,132 +1121,177 @@ function handleSyncResponse(sentRecords, response) {
 }
 
 // --- 送信処理 ---
-form.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  try {
-    const entryType = getEntryMode();
-    const toIso = (val) => {
-      if (!val) return '';
-      const d = new Date(val);
-      return d.toISOString();
-    };
-    if (!planInput) throw new Error('Plan input missing');
-    let planId = planInput.value.trim();
+if (startForm) {
+  startForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      if (!planInput) throw new Error('Plan input missing');
+      let planId = planInput.value.trim();
+      const startAt = toISOStringValue($('startAt')?.value);
+      const operator = operatorInput?.value?.trim() || '';
+      const equipment = equipmentInput?.value?.trim() || '';
 
-    const operator = operatorInput?.value?.trim() || '';
-    const equipment = equipmentInput?.value?.trim() || '';
+      if (!planId) { msg('Plan ID は必須です'); return; }
+      if (!startAt) { msg('作業開始日時を入力してください'); return; }
+      if (!operator) { msg('作業者を入力してください'); return; }
+      if (!equipment) { msg('設備を入力してください'); return; }
 
-    const startAt = entryType === 'start' ? toIso($('startAt')?.value) : '';
-    const endAt = entryType === 'complete' ? toIso($('endAt')?.value) : '';
+      const submission = {
+        entryType: 'start',
+        planId,
+        startAt,
+        operator,
+        equipment,
+      };
 
-    if (entryType === 'start' && !planId) { msg('Plan ID は必須です'); return; }
-    if (entryType === 'start' && !startAt) { msg('作業開始日時を入力してください'); return; }
-    if (entryType === 'start' && !operator) { msg('作業者を入力してください'); return; }
-    if (entryType === 'start' && !equipment) { msg('設備を入力してください'); return; }
-    if (entryType === 'complete' && !endAt) { msg('作業完了日時を入力してください'); return; }
-
-    if (startAt && endAt && new Date(startAt) > new Date(endAt)) {
-      msg('完了日時は開始日時以降にしてください'); return;
-    }
-
-    const qty = entryType === 'complete' ? Number($('qty')?.value || 0) : 0;
-    const downtimeMin = entryType === 'complete' ? Number($('downtimeMin')?.value || 0) : 0;
-
-    if (entryType === 'complete' && (!Number.isFinite(qty) || qty < 0)) {
-      msg('個数は0以上の数値で入力してください'); return;
-    }
-    if (entryType === 'complete' && (!Number.isFinite(downtimeMin) || downtimeMin < 0)) {
-      msg('ダウンタイムは0以上の数値で入力してください'); return;
-    }
-
-    const submission = { entryType };
-    if (planId) submission.planId = planId;
-
-    if (entryType === 'start') {
-      submission.startAt = startAt;
-      submission.operator = operator;
-      submission.equipment = equipment;
-    } else {
-      const startRecordId = $('startLink')?.value;
-      if (!startRecordId) {
-        msg('開始レポートを選択してください');
+      const prepared = sanitizeRecordForSend(submission);
+      if (!validateRecordForSend(prepared)) {
+        msg('入力内容を確認してください');
         return;
       }
-      const list = loadOpenStarts();
-      const found = list.find((item) => item.recordId === startRecordId);
-      if (found && found.planId) {
-        planId = found.planId;
-        submission.planId = planId;
+
+      if (prepared.planId && prepared.planId !== planId) {
+        planId = prepared.planId;
+        planInput.value = planId;
+        applyPlanSelection(planId, true);
       }
-      submission.startRecordId = startRecordId;
-      submission.endAt = endAt;
-      submission.qty = qty;
-      submission.downtimeMin = downtimeMin;
-    }
 
-    const prepared = sanitizeRecordForSend(submission);
-    if (prepared.planId) {
-      planId = prepared.planId;
-    }
-    if (!validateRecordForSend(prepared)) {
-      msg('入力内容を確認してください');
-      return;
-    }
+      const successText = '作業開始を登録しました';
+      const queuedText = '作業開始をキューへ保存しました';
+      let shouldReset = false;
 
-    const successText = entryType === 'start' ? '作業開始を登録しました' : '作業完了を登録しました';
-    const queuedText = entryType === 'start' ? '作業開始をキューへ保存しました' : '作業完了をキューへ保存しました';
-    let shouldReset = false;
-    if (navigator.onLine) {
-      try {
-        const response = await postRecords([prepared]);
-        handleSyncResponse([prepared], response);
-        msg(successText, true);
-        shouldReset = true;
-      } catch (err) {
-        const retriable = isRetriableError(err);
-        const detail = extractErrorMessage(err);
-        if (entryType === 'complete') {
-          markStartPending(prepared.startRecordId, retriable);
-        }
-        if (retriable) {
-          await enqueue(prepared);
-          msg(detail ? `一時的に失敗: ${detail}（オンライン復帰で再送）` : '一時的に失敗。入力内容をキューへ保存しました（オンライン復帰で自動送信）');
+      if (navigator.onLine) {
+        try {
+          const response = await postRecords([prepared]);
+          handleSyncResponse([prepared], response);
+          msg(successText, true);
           shouldReset = true;
-        } else {
-          msg(detail ? `送信エラー: ${detail}` : '送信エラーが発生しました。入力内容を確認してください');
+        } catch (err) {
+          const retriable = isRetriableError(err);
+          const detail = extractErrorMessage(err);
+          if (retriable) {
+            await enqueue(prepared);
+            msg(detail ? `一時的に失敗: ${detail}（オンライン復帰で再送）` : '一時的に失敗。入力内容をキューへ保存しました（オンライン復帰で自動送信）');
+            shouldReset = true;
+          } else {
+            msg(detail ? `送信エラー: ${detail}` : '送信エラーが発生しました。入力内容を確認してください');
+          }
         }
+      } else {
+        await enqueue(prepared);
+        msg(`オフラインのため${queuedText}`);
+        shouldReset = true;
       }
-    } else {
-      if (entryType === 'complete') markStartPending(prepared.startRecordId, true);
-      await enqueue(prepared);
-      msg(`オフラインのため${queuedText}`);
-      shouldReset = true;
-    }
 
-    if (shouldReset) {
-      if (entryType === 'start') {
+      if (shouldReset) {
         setDateTimeToNow($('startAt'));
         if (operatorInput) operatorInput.value = '';
         if (equipmentInput) equipmentInput.value = '';
-        renderStartOptions();
+        hideCompletionForm();
+        showActiveView();
         if (planId) applyPlanSelection(planId, true);
-      } else {
-        setDateTimeToNow($('endAt'));
-        $('qty').value = '0';
-        $('downtimeMin').value = '0';
-        if (startLinkSelect) {
-          startLinkSelect.value = '';
-          updateStartSummary();
-        }
-        planInput.value = '';
-        renderPlanSummary(null);
       }
+    } catch (err) {
+      msg('送信エラー: ' + (err?.message || err));
+      console.error(err);
     }
-  } catch (err) {
-    msg('送信エラー: ' + (err?.message || err));
-    console.error(err);
-  }
-});
+  });
+}
+
+if (completeForm) {
+  completeForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      if (!selectedStartId) {
+        msg('作業中カードを選択してください');
+        return;
+      }
+      const list = loadOpenStarts();
+      const found = list.find((item) => item.recordId === selectedStartId);
+      if (!found) {
+        msg('対象のレポートが見つかりません。再読み込みしてください');
+        hideCompletionForm();
+        renderActiveCards();
+        return;
+      }
+
+      const endAt = toISOStringValue($('endAt')?.value);
+      if (!endAt) { msg('作業完了日時を入力してください'); return; }
+
+      if (found.startAt) {
+        const startDate = new Date(found.startAt);
+        const endDate = new Date(endAt);
+        if (!Number.isNaN(startDate.getTime()) && !Number.isNaN(endDate.getTime()) && endDate < startDate) {
+          msg('完了日時は開始日時以降にしてください');
+          return;
+        }
+      }
+
+      const qtyInput = $('qty');
+      const downtimeInput = $('downtimeMin');
+      const qty = Number(qtyInput?.value || 0);
+      const downtimeMin = Number(downtimeInput?.value || 0);
+
+      if (!Number.isFinite(qty) || qty < 0) { msg('個数は0以上の数値で入力してください'); return; }
+      if (!Number.isFinite(downtimeMin) || downtimeMin < 0) { msg('ダウンタイムは0以上の数値で入力してください'); return; }
+
+      const submission = {
+        entryType: 'complete',
+        startRecordId: selectedStartId,
+        endAt,
+        qty,
+        downtimeMin,
+      };
+      if (found.planId) submission.planId = found.planId;
+
+      const prepared = sanitizeRecordForSend(submission);
+      if (!validateRecordForSend(prepared)) {
+        msg('入力内容を確認してください');
+        return;
+      }
+
+      const successText = '作業完了を登録しました';
+      const queuedText = '作業完了をキューへ保存しました';
+      let shouldReset = false;
+
+      if (navigator.onLine) {
+        try {
+          const response = await postRecords([prepared]);
+          handleSyncResponse([prepared], response);
+          msg(successText, true);
+          shouldReset = true;
+        } catch (err) {
+          const retriable = isRetriableError(err);
+          const detail = extractErrorMessage(err);
+          markStartPending(prepared.startRecordId, retriable);
+          if (retriable) {
+            await enqueue(prepared);
+            msg(detail ? `一時的に失敗: ${detail}（オンライン復帰で再送）` : '一時的に失敗。入力内容をキューへ保存しました（オンライン復帰で自動送信）');
+            shouldReset = true;
+          } else {
+            msg(detail ? `送信エラー: ${detail}` : '送信エラーが発生しました。入力内容を確認してください');
+          }
+        }
+      } else {
+        markStartPending(prepared.startRecordId, true);
+        await enqueue(prepared);
+        msg(`オフラインのため${queuedText}`);
+        shouldReset = true;
+      }
+
+      if (shouldReset) {
+        setDateTimeToNow($('endAt'));
+        if (qtyInput) qtyInput.value = '0';
+        if (downtimeInput) downtimeInput.value = '0';
+        hideCompletionForm();
+        renderActiveCards();
+      }
+    } catch (err) {
+      msg('送信エラー: ' + (err?.message || err));
+      console.error(err);
+    }
+  });
+}
 
 // --- オンライン復帰時にキューを再送 ---
 async function flushQueue() {
@@ -1230,6 +1343,21 @@ async function flushQueue() {
       });
     }
   }
+  scheduleOpenStartHydration();
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (navigator.onLine && !document.hidden) {
+    flushQueue();
+    refreshOpenStartsFromServer();
+  }
+});
+
+// --- 初期ロードでサーバ同期を試行 ---
+if (navigator.onLine) {
+  refreshOpenStartsFromServer();
+  fetchFormProperties();
+  flushQueue();
 }
 
 window.addEventListener('online', () => {
@@ -1258,36 +1386,6 @@ if (navigator.onLine) {
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').catch(() => {});
-}
-
-// --- start summary ---
-function updateStartSummary(info) {
-  if (!startSummary) return;
-  const details = info;
-  if (!details) {
-    const selected = startLinkSelect?.value;
-    if (selected) {
-      const list = loadOpenStarts();
-      const found = list.find((item) => item.recordId === selected);
-      if (found) {
-        return updateStartSummary(found);
-      }
-    }
-    startSummary.textContent = '未選択';
-    return;
-  }
-  const ts = details.startAt ? new Date(details.startAt).toLocaleString() : '開始日時未設定';
-  const planInfo = details.planId && planLookupState ? planLookupState.cache.get(details.planId) : null;
-  const planLabel = planInfo ? lookupLabelFromData(planLookupState, planInfo) : (details.planId ? `Plan ${details.planId}` : null);
-  const operatorDisplay = details.operator ? describeLookupValue(operatorLookupState, details.operator) : '';
-  const equipmentDisplay = details.equipment ? describeLookupValue(equipmentLookupState, details.equipment) : '';
-  const parts = [
-    planLabel,
-    operatorDisplay ? `作業者: ${operatorDisplay}` : null,
-    equipmentDisplay ? `設備: ${equipmentDisplay}` : null,
-    ts ? `開始: ${ts}` : null,
-  ].filter(Boolean);
-  startSummary.textContent = parts.join(' / ') || '未選択';
 }
 
 window.addEventListener('offline', () => {
