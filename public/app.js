@@ -268,6 +268,7 @@ function createLookupState(fieldCode, input, listEl, options = {}) {
     applyData: options.applyData || (() => {}),
     afterCacheUpdate: options.afterCacheUpdate || (() => {}),
     storageKey: options.storageKey || `${LOOKUP_CACHE_PREFIX}${fieldCode}`,
+    hydratingKeys: new Set(),
   };
   lookupStates.set(fieldCode, state);
   return state;
@@ -364,6 +365,7 @@ function refreshLookupConfigs() {
       fetchLookupOptions(state, '');
     }
   });
+  scheduleOpenStartHydration();
 }
 
 function loadLookupCache(state) {
@@ -658,6 +660,118 @@ async function applyPlanSelection(planId, fetchIfMissing = true) {
 }
 
 // --- 作業開始レコード管理 ---
+function describeLookupValue(state, value) {
+  if (!state || value == null) return '';
+  const key = String(value).trim();
+  if (!key) return '';
+  const cached = state.cache?.get ? state.cache.get(key) : null;
+  if (cached) {
+    return lookupLabelFromData(state, cached) || cached.key || key;
+  }
+  ensureLabelIndex(state);
+  const lower = key.toLowerCase();
+  if (state.labelLookup?.has?.(lower)) {
+    const mapped = state.labelLookup.get(lower);
+    if (mapped && state.cache?.has?.(mapped)) {
+      const match = state.cache.get(mapped);
+      return lookupLabelFromData(state, match) || match?.key || mapped;
+    }
+    return mapped || key;
+  }
+  return key;
+}
+
+async function ensureLookupValue(state, value) {
+  if (!state || !state.config) return false;
+  if (!navigator.onLine) return false;
+  const key = String(value ?? '').trim();
+  if (!key) return false;
+  if (state.cache?.has?.(key)) return false;
+  if (state.hydratingKeys?.has?.(key)) return false;
+  state.hydratingKeys?.add?.(key);
+  try {
+    const record = await fetchLookupRecord(state, key);
+    if (record && record.key) {
+      state.cache.set(record.key, record);
+      trimLookupCache(state);
+      persistLookupCache(state);
+      ensureLabelIndex(state);
+      state.afterCacheUpdate();
+      return true;
+    }
+  } catch (e) {
+    console.warn('failed to hydrate lookup value', state.fieldCode, key, e);
+  } finally {
+    state.hydratingKeys?.delete?.(key);
+  }
+  return false;
+}
+
+async function hydrateLookupValues(state, values) {
+  if (!state || !state.config) return false;
+  const list = Array.isArray(values) ? values : [];
+  const normalized = uniqueList(
+    list
+      .map((item) => (item == null ? '' : String(item).trim()))
+      .filter((item) => item)
+  );
+  if (!normalized.length) return false;
+  const results = await Promise.all(normalized.map((val) => ensureLookupValue(state, val)));
+  return results.some(Boolean);
+}
+
+let openStartHydrationTimer = null;
+function shouldHydrateOpenStarts(records = loadOpenStarts()) {
+  const list = Array.isArray(records) ? records : [];
+  if (!list.length) return false;
+  const needs = (state, values) => {
+    if (!state?.config) return false;
+    return values.some((val) => {
+      const key = String(val ?? '').trim();
+      if (!key) return false;
+      return !state.cache?.has?.(key);
+    });
+  };
+  if (needs(planLookupState, list.map((item) => item.planId))) return true;
+  if (needs(operatorLookupState, list.map((item) => item.operator))) return true;
+  if (needs(equipmentLookupState, list.map((item) => item.equipment))) return true;
+  return false;
+}
+
+function scheduleOpenStartHydration() {
+  if (openStartHydrationTimer) return;
+  if (!shouldHydrateOpenStarts()) return;
+  openStartHydrationTimer = setTimeout(() => {
+    openStartHydrationTimer = null;
+    const records = loadOpenStarts();
+    if (shouldHydrateOpenStarts(records)) {
+      hydrateOpenStartLookups(records);
+    }
+  }, 0);
+}
+
+async function hydrateOpenStartLookups(records) {
+  if (!navigator.onLine) return;
+  const list = Array.isArray(records) ? records : [];
+  const planIds = list.map((item) => item.planId).filter(Boolean);
+  const operatorIds = list.map((item) => item.operator).filter(Boolean);
+  const equipmentIds = list.map((item) => item.equipment).filter(Boolean);
+  const tasks = [];
+  if (planLookupState?.config) tasks.push(hydrateLookupValues(planLookupState, planIds));
+  if (operatorLookupState?.config) tasks.push(hydrateLookupValues(operatorLookupState, operatorIds));
+  if (equipmentLookupState?.config) tasks.push(hydrateLookupValues(equipmentLookupState, equipmentIds));
+  if (!tasks.length) return;
+  try {
+    const results = await Promise.all(tasks);
+    if (results.some(Boolean)) {
+      renderStartOptions();
+      updateStartSummary();
+    }
+  } catch (e) {
+    console.warn('failed to hydrate open start lookups', e);
+  }
+}
+
 function renderStartOptions() {
   if (!startLinkSelect) return;
   const prev = startLinkSelect.value;
@@ -667,8 +781,10 @@ function renderStartOptions() {
     const opt = document.createElement('option');
     opt.value = item.recordId;
     const ts = item.startAt ? new Date(item.startAt).toLocaleString() : '開始日時未設定';
-    const operatorLabel = item.operator ? `作業者: ${item.operator}` : '作業者: -';
-    const equipmentLabel = item.equipment ? `設備: ${item.equipment}` : '設備: -';
+    const operatorDisplay = item.operator ? describeLookupValue(operatorLookupState, item.operator) : '';
+    const operatorLabel = operatorDisplay ? `作業者: ${operatorDisplay}` : '作業者: -';
+    const equipmentDisplay = item.equipment ? describeLookupValue(equipmentLookupState, item.equipment) : '';
+    const equipmentLabel = equipmentDisplay ? `設備: ${equipmentDisplay}` : '設備: -';
     const planLabel = item.planId ? `Plan ${item.planId}` : 'Plan 未設定';
     const planInfo = item.planId && planLookupState ? planLookupState.cache.get(item.planId) : null;
     const planText = planInfo ? lookupLabelFromData(planLookupState, planInfo) : planLabel;
@@ -682,6 +798,7 @@ function renderStartOptions() {
   }
   updateStartSummary();
   syncPlanIdWithSelection();
+  scheduleOpenStartHydration();
 }
 
 function upsertOpenStart(info) {
@@ -973,6 +1090,12 @@ form.addEventListener('submit', async (e) => {
     if (entryType === 'complete' && (!Number.isFinite(downtimeMin) || downtimeMin < 0)) {
       msg('ダウンタイムは0以上の数値で入力してください'); return;
     }
+    if (entryType === 'complete' && (!Number.isFinite(downtimeMin) || downtimeMin < 0)) {
+      msg('ダウンタイムは0以上の数値で入力してください'); return;
+    }
+
+    const record = { entryType };
+    if (planId) record.planId = planId;
 
     const record = { entryType };
     if (planId) record.planId = planId;
@@ -1122,6 +1245,7 @@ window.addEventListener('online', () => {
   if (planInput?.value) {
     applyPlanSelection(planInput.value.trim(), true);
   }
+  scheduleOpenStartHydration();
 });
 
 document.addEventListener('visibilitychange', () => {
@@ -1161,10 +1285,12 @@ function updateStartSummary(info) {
   const ts = details.startAt ? new Date(details.startAt).toLocaleString() : '開始日時未設定';
   const planInfo = details.planId && planLookupState ? planLookupState.cache.get(details.planId) : null;
   const planLabel = planInfo ? lookupLabelFromData(planLookupState, planInfo) : (details.planId ? `Plan ${details.planId}` : null);
+  const operatorDisplay = details.operator ? describeLookupValue(operatorLookupState, details.operator) : '';
+  const equipmentDisplay = details.equipment ? describeLookupValue(equipmentLookupState, details.equipment) : '';
   const parts = [
     planLabel,
-    details.operator ? `作業者: ${details.operator}` : null,
-    details.equipment ? `設備: ${details.equipment}` : null,
+    operatorDisplay ? `作業者: ${operatorDisplay}` : null,
+    equipmentDisplay ? `設備: ${equipmentDisplay}` : null,
     ts ? `開始: ${ts}` : null,
   ].filter(Boolean);
   startSummary.textContent = parts.join(' / ') || '未選択';
