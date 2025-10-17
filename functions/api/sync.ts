@@ -6,6 +6,7 @@ export interface Env {
   KINTONE_TOKEN_LOG: string;  // 実績アプリのAPIトークン（追加権限）
   KINTONE_TOKEN_LOG_UPDATE?: string; // 実績アプリのAPIトークン（更新権限）
   KINTONE_TOKEN_LUP?: string; // 参照元(lookup)アプリのAPIトークン（閲覧権限）
+  KINTONE_FORM_SCHEMA?: string; // form APIが使えない場合のフォールバックJSON
 }
 function safeJson(s: string) {
   try { return JSON.parse(s); } catch { return s; }
@@ -63,24 +64,66 @@ type RequestContext = Parameters<PagesFunction<Env>>[0];
 
 type FormProperties = Record<string, any> & {
   properties?: Record<string, any>;
+  warning?: { message: string };
 };
 
+let cachedFormDefinition: FormProperties | null = null;
+
+function loadStaticFormDefinition(env: Env): FormProperties | null {
+  const raw = env.KINTONE_FORM_SCHEMA;
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && parsed.properties) {
+      return parsed as FormProperties;
+    }
+  } catch (err) {
+    console.warn("failed to parse KINTONE_FORM_SCHEMA", err);
+  }
+  return null;
+}
+
 async function fetchFormDefinition(context: RequestContext): Promise<FormProperties> {
+  if (cachedFormDefinition) {
+    return cachedFormDefinition;
+  }
   const endpoint = `${context.env.KINTONE_BASE}/k/v1/app/form/fields.json?app=${encodeURIComponent(context.env.KINTONE_LOG_APP)}`;
   const headers = buildKintoneHeaders(context.env);
   const res = await fetch(endpoint, { method: "GET", headers });
   if (!res.ok) {
-    const detail = await res.text();
+    const detailText = await res.text();
+    const detail = safeJson(detailText);
+    const fallback = loadStaticFormDefinition(context.env);
+    if (fallback) {
+      if (!fallback.warning) {
+        fallback.warning = { message: "returned static form schema" };
+      }
+      cachedFormDefinition = fallback;
+      return fallback;
+    }
+    if (
+      res.status === 400 &&
+      detail &&
+      typeof detail === "object" &&
+      (detail as any).code === "CB_IL02"
+    ) {
+      cachedFormDefinition = {
+        properties: {},
+        warning: { message: "form API unavailable for provided token" },
+      };
+      return cachedFormDefinition;
+    }
     throw new Response(JSON.stringify({
       error: "kintone error",
-      detail: safeJson(detail),
+      detail,
     }), { status: res.status, headers: JSON_CORS_HEADERS });
   }
   const json = await res.json();
   if (!json || typeof json !== "object" || !json.properties) {
     throw new Response(JSON.stringify({ error: "unexpected form definition" }), { status: 500, headers: JSON_CORS_HEADERS });
   }
-  return json;
+  cachedFormDefinition = json as FormProperties;
+  return cachedFormDefinition;
 }
 
 function buildKintoneHeaders(env: Env, primaryToken?: string) {
@@ -132,9 +175,6 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       }
     }
 
-    const formDef = await fetchFormDefinition(context);
-    const properties = formDef.properties as Record<string, any>;
-
     if (type === "open-starts") {
       const fields = ["plan_id", "start_at", "operator", "equipment", "end_at", "$id"];
       const params = new URLSearchParams();
@@ -159,6 +199,9 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       }));
       return new Response(JSON.stringify({ records: simplified }), { status: 200, headers: JSON_CORS_HEADERS });
     }
+
+    const formDef = await fetchFormDefinition(context);
+    const properties = formDef.properties as Record<string, any>;
 
     const planFieldCode = url.searchParams.get("field") ?? "";
     const term = url.searchParams.get("term") ?? "";
