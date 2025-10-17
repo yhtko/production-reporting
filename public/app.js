@@ -1343,6 +1343,21 @@ async function flushQueue() {
       });
     }
   }
+  scheduleOpenStartHydration();
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (navigator.onLine && !document.hidden) {
+    flushQueue();
+    refreshOpenStartsFromServer();
+  }
+});
+
+// --- 初期ロードでサーバ同期を試行 ---
+if (navigator.onLine) {
+  refreshOpenStartsFromServer();
+  fetchFormProperties();
+  flushQueue();
 }
 
 window.addEventListener('online', () => {
