@@ -105,7 +105,10 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       return new Response(JSON.stringify({ error: "bad payload (array or {records:[]} expected)" }), { status: 400, headers: CORS_HEADERS });
     }
 
-    const asNum = (v: any) => (typeof v === "number" ? v : Number(v));
+    const asNum = (v: any) => {
+      const n = typeof v === "number" ? v : Number(v);
+      return Number.isFinite(n) ? n : 0;
+    };
     const kintoneRecords = arr.map((r) => ({
       plan_id:        { value: String(r?.planId ?? "") },
       start_at:       { value: String(r?.startAt ?? "") },
@@ -115,7 +118,19 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       downtime_reason:{ value: String(r?.downtimeReason ?? "") },
       operator:       { value: (String(r?.operator ?? "").trim() || "-")  },
       equipment:      { value: (String(r?.equipment ?? "") .trim() || "-") },
-    })).filter(r => r.plan_id.value && r.start_at.value && r.end_at.value);
+    })).filter((r) => {
+      if (!r.plan_id.value) return false;
+      const hasStart = typeof r.start_at.value === "string" ? r.start_at.value.trim().length > 0 : !!r.start_at.value;
+      const hasEnd = typeof r.end_at.value === "string" ? r.end_at.value.trim().length > 0 : !!r.end_at.value;
+      if (!hasStart && !hasEnd) return false;
+      if (hasEnd) {
+        const qty = Number(r.quantity.value);
+        const downtime = Number(r.downtime_min.value);
+        if (!Number.isFinite(qty) || qty < 0) return false;
+        if (!Number.isFinite(downtime) || downtime < 0) return false;
+      }
+      return true;
+    });
 
     if (!kintoneRecords.length) {
       return new Response(JSON.stringify({ error: "bad payload (required fields missing)" }), { status: 400, headers: CORS_HEADERS });
