@@ -4,6 +4,7 @@ export interface Env {
   KINTONE_BASE: string;       // 例: https://xxxxx.cybozu.com（末尾/なし）
   KINTONE_LOG_APP: string;    // 実績アプリID（数値文字列）
   KINTONE_TOKEN_LOG: string;  // 実績アプリのAPIトークン（追加権限）
+  KINTONE_TOKEN_LOG_UPDATE?: string; // 実績アプリのAPIトークン（更新権限）
   KINTONE_TOKEN_LUP?: string; // 参照元(lookup)アプリのAPIトークン（閲覧権限）
 }
 function safeJson(s: string) {
@@ -69,8 +70,14 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     catch { return new Response(JSON.stringify({ error: "bad payload (not json)" }), { status: 400, headers: CORS_HEADERS }); }
 
     // 共通ヘッダー（複数トークンをカンマ連結）
-    const tokens = [context.env.KINTONE_TOKEN_LOG, context.env.KINTONE_TOKEN_LUP].filter(Boolean).join(",");
-    const jsonHeaders = { "Content-Type": "application/json", "X-Cybozu-API-Token": tokens };
+    const makeHeaders = (primaryToken: string | undefined) => {
+      const tokens = [primaryToken ?? context.env.KINTONE_TOKEN_LOG, context.env.KINTONE_TOKEN_LUP]
+        .filter(Boolean)
+        .join(",");
+      return { "Content-Type": "application/json", "X-Cybozu-API-Token": tokens };
+    };
+    const createHeaders = makeHeaders(context.env.KINTONE_TOKEN_LOG);
+    const updateHeaders = makeHeaders(context.env.KINTONE_TOKEN_LOG_UPDATE);
 
     // ---- ① kintoneネイティブ形式ならそのまま透過 ----
     if (isKintoneNativePayload(raw)) {
@@ -80,7 +87,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       const payload = hasRecord ? { app, record: raw.record } : { app, records: raw.records };
       const payloadText = JSON.stringify(payload);
 
-      const res = await fetch(endpoint, { method: "POST", headers: jsonHeaders, body: payloadText });
+      const res = await fetch(endpoint, { method: "POST", headers: createHeaders, body: payloadText });
       if (!res.ok) {
         const err = await res.text();
         return new Response(JSON.stringify({
@@ -166,7 +173,7 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
       const endpoint = `${context.env.KINTONE_BASE}/k/v1/records.json`;
       const payload = { app: context.env.KINTONE_LOG_APP, records: startRecords };
       const payloadText = JSON.stringify(payload);
-      const res = await fetch(endpoint, { method: "POST", headers: jsonHeaders, body: payloadText });
+      const res = await fetch(endpoint, { method: "POST", headers: createHeaders, body: payloadText });
       if (!res.ok) {
         const err = await res.text();
         return new Response(JSON.stringify({
@@ -188,13 +195,24 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
         records: completionUpdates.map((c) => ({ id: c.id, record: c.record })),
       };
       const payloadText = JSON.stringify(payload);
-      const res = await fetch(endpoint, { method: "PUT", headers: jsonHeaders, body: payloadText });
+      const res = await fetch(endpoint, { method: "PUT", headers: updateHeaders, body: payloadText });
       if (!res.ok) {
         const err = await res.text();
+        const detail = safeJson(err);
+        const extra: Record<string, unknown> = {};
+        if (
+          res.status === 403 &&
+          detail &&
+          typeof detail === "object" &&
+          (detail as Record<string, unknown>).code === "GAIA_NO01"
+        ) {
+          extra.hint = "Set KINTONE_TOKEN_LOG_UPDATE to an API token that has update permission for the log app.";
+        }
         return new Response(JSON.stringify({
           error: "kintone error",
-          detail: safeJson(err),
+          detail,
           sentPayloadPreview: payloadText.slice(0, 400),
+          ...extra,
         }), { status: res.status, headers: { "Content-Type": "application/json", ...CORS_HEADERS } });
       }
       const body = await res.json();
