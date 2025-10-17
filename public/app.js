@@ -1090,6 +1090,12 @@ form.addEventListener('submit', async (e) => {
     if (entryType === 'complete' && (!Number.isFinite(downtimeMin) || downtimeMin < 0)) {
       msg('ダウンタイムは0以上の数値で入力してください'); return;
     }
+    if (entryType === 'complete' && (!Number.isFinite(downtimeMin) || downtimeMin < 0)) {
+      msg('ダウンタイムは0以上の数値で入力してください'); return;
+    }
+
+    const record = { entryType };
+    if (planId) record.planId = planId;
 
     const record = { entryType };
     if (planId) record.planId = planId;
