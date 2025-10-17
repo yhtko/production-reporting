@@ -39,6 +39,41 @@ async function allAndClear() {
 const $ = (id) => document.getElementById(id);
 const msg = (t, ok=false) => { const m=$('msg'); m.textContent=t; m.className= ok? 'ok':'err'; };
 
+const form = $('reportForm');
+const entryModeInputs = Array.from(document.querySelectorAll('input[name="entryType"]'));
+const formRows = Array.from(document.querySelectorAll('#reportForm .row'));
+
+const getEntryMode = () => document.querySelector('input[name="entryType"]:checked')?.value || 'start';
+
+function applyEntryMode(mode) {
+  formRows.forEach((row) => {
+    const modes = (row.dataset.modes || '').split(',').map((m) => m.trim()).filter(Boolean);
+    const shouldShow = !modes.length || modes.includes(mode);
+    row.classList.toggle('hidden', !shouldShow);
+    const input = row.querySelector('input');
+    if (!input) return;
+    input.disabled = !shouldShow;
+    if (shouldShow && row.dataset.required === 'true') {
+      input.setAttribute('required', '');
+    } else {
+      input.removeAttribute('required');
+    }
+    if (!shouldShow) {
+      if (input.type === 'number') {
+        input.value = input.defaultValue ?? '';
+      } else if (input.type === 'datetime-local') {
+        input.value = '';
+      }
+    }
+  });
+}
+
+entryModeInputs.forEach((input) => {
+  input.addEventListener('change', () => applyEntryMode(input.value));
+});
+
+applyEntryMode(getEntryMode());
+
 // --- 送信本体 ---
 async function postRecords(records) {
   const res = await fetch('https://production-reporting.pages.dev/api/sync', {
@@ -54,9 +89,10 @@ async function postRecords(records) {
 }
 
 // --- 送信処理 ---
-$('reportForm').addEventListener('submit', async (e) => {
+form.addEventListener('submit', async (e) => {
   e.preventDefault();
   try {
+    const entryType = getEntryMode();
     // 入力取得
     const toIso = (val) => {
       // datetime-localをISOに。空なら空文字
@@ -66,37 +102,57 @@ $('reportForm').addEventListener('submit', async (e) => {
       return d.toISOString();
     };
     const planId = $('planId').value.trim();
-    const startAt = toIso($('startAt').value);
-    const endAt   = toIso($('endAt').value);
-    const qty = Number($('qty').value || 0);
-    const downtimeMin = Number($('downtimeMin').value || 0);
+    if (!planId) { msg('Plan ID は必須です'); return; }
+
     const operator = $('operator').value.trim();
     const equipment = $('equipment').value.trim();
 
-    if (!planId || !startAt || !endAt) {
-      msg('Plan/Start/End は必須です'); return;
-    }
-    if (new Date(startAt) > new Date(endAt)) {
-      msg('End は Start 以降にしてください'); return;
+    const startAt = entryType === 'start' ? toIso($('startAt').value) : '';
+    const endAt = entryType === 'complete' ? toIso($('endAt').value) : '';
+
+    if (entryType === 'start' && !startAt) { msg('作業開始日時を入力してください'); return; }
+    if (entryType === 'complete' && !endAt) { msg('作業完了日時を入力してください'); return; }
+    if (entryType === 'start' && !operator) { msg('作業者を入力してください'); return; }
+
+    if (startAt && endAt && new Date(startAt) > new Date(endAt)) {
+      msg('完了日時は開始日時以降にしてください'); return;
     }
 
-    const record = { planId, startAt, endAt, qty, downtimeMin, operator, equipment };
-    console.log('POST payload', { records:[record] });
+    const qty = entryType === 'complete' ? Number($('qty').value || 0) : 0;
+    const downtimeMin = entryType === 'complete' ? Number($('downtimeMin').value || 0) : 0;
+
+    if (entryType === 'complete' && (!Number.isFinite(qty) || qty < 0)) {
+      msg('個数は0以上の数値で入力してください'); return;
+    }
+    if (entryType === 'complete' && (!Number.isFinite(downtimeMin) || downtimeMin < 0)) {
+      msg('ダウンタイムは0以上の数値で入力してください'); return;
+    }
+
+    const record = { planId, startAt, endAt, qty, downtimeMin, operator, equipment, entryType };
+    console.log('POST payload', { entryType, records:[record] });
+    const successText = entryType === 'start' ? '作業開始を登録しました' : '作業完了を登録しました';
+    const queuedText = entryType === 'start' ? '作業開始をキューへ保存しました' : '作業完了をキューへ保存しました';
     // オンラインなら即送信、失敗したらキューへ
     if (navigator.onLine) {
       try {
         await postRecords([record]);
-        msg('送信しました', true);
+        msg(successText, true);
       } catch (e) {
         await enqueue(record);
-        msg('一時的に失敗。キューへ保存しました（オンライン復帰で自動送信）');
+        msg('一時的に失敗。入力内容をキューへ保存しました（オンライン復帰で自動送信）');
       }
     } else {
       await enqueue(record);
-      msg('オフラインのためキューへ保存しました');
+      msg(`オフラインのため${queuedText}`);
     }
-    // フォームを軽くクリア（必要に応じて）
-    // $('qty').value = 0; $('downtimeMin').value = 0;
+    if (entryType === 'start') {
+      $('startAt').value = '';
+      $('operator').value = '';
+    } else {
+      $('endAt').value = '';
+      $('qty').value = '0';
+      $('downtimeMin').value = '0';
+    }
   } catch (e) {
     msg('送信エラー: ' + (e?.message || e));
     console.error(e);
