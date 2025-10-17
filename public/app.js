@@ -97,6 +97,128 @@ function uniqueList(items) {
   return result;
 }
 
+function ensureLabelIndex(state) {
+  if (!state || !state.cache?.size) return;
+  if (state.labelLookup && state.labelLookup.size) return;
+  state.labelLookup = new Map();
+  for (const item of state.cache.values()) {
+    if (!item || !item.key) continue;
+    const label = lookupLabelFromData(state, item);
+    const keyLower = item.key.toLowerCase();
+    if (keyLower) {
+      state.labelLookup.set(keyLower, item.key);
+    }
+    if (label) {
+      state.labelLookup.set(label.toLowerCase(), item.key);
+      const combo = `${item.key} / ${label}`.toLowerCase();
+      state.labelLookup.set(combo, item.key);
+    }
+  }
+}
+
+function resolveLookupKey(state, rawValue) {
+  if (!state || rawValue == null) return rawValue;
+  const value = String(rawValue).trim();
+  if (!value) return value;
+  if (state.cache?.has(value)) {
+    const found = state.cache.get(value);
+    return (found && found.key) ? found.key : value;
+  }
+  ensureLabelIndex(state);
+  const lower = value.toLowerCase();
+  if (state.labelLookup?.has(lower)) {
+    return state.labelLookup.get(lower);
+  }
+  if (value.includes('/')) {
+    const first = value.split('/')[0].trim();
+    if (first && state.cache?.has(first)) {
+      const found = state.cache.get(first);
+      return (found && found.key) ? found.key : first;
+    }
+  }
+  if (state.cache) {
+    for (const item of state.cache.values()) {
+      const label = lookupLabelFromData(state, item);
+      if (label && label.toLowerCase() === lower) {
+        return item.key;
+      }
+    }
+  }
+  return value;
+}
+
+function sanitizeRecordForSend(record) {
+  if (!record || typeof record !== 'object') return record;
+  const entryType = record.entryType === 'complete' ? 'complete' : 'start';
+  const base = { ...record, entryType };
+  if (entryType === 'start') {
+    base.planId = resolveLookupKey(planLookupState, base.planId || '');
+    base.operator = resolveLookupKey(operatorLookupState, base.operator || '');
+    base.equipment = resolveLookupKey(equipmentLookupState, base.equipment || '');
+  } else {
+    if (base.planId) {
+      base.planId = resolveLookupKey(planLookupState, base.planId);
+    }
+  }
+  if (base.qty !== undefined) {
+    const n = Number(base.qty);
+    base.qty = Number.isFinite(n) ? n : 0;
+  }
+  if (base.downtimeMin !== undefined) {
+    const n = Number(base.downtimeMin);
+    base.downtimeMin = Number.isFinite(n) ? n : 0;
+  }
+  return base;
+}
+
+function validateRecordForSend(record) {
+  if (!record || typeof record !== 'object') return false;
+  const entryType = record.entryType === 'complete' ? 'complete' : 'start';
+  if (entryType === 'start') {
+    return Boolean(record.planId && record.startAt && record.operator && record.equipment);
+  }
+  if (!record.startRecordId || !record.endAt) return false;
+  const qty = Number(record.qty ?? 0);
+  const downtime = Number(record.downtimeMin ?? 0);
+  if (!Number.isFinite(qty) || qty < 0) return false;
+  if (!Number.isFinite(downtime) || downtime < 0) return false;
+  return true;
+}
+
+function splitValidInvalid(records) {
+  const valid = [];
+  const invalid = [];
+  records.forEach((rec) => {
+    if (validateRecordForSend(rec)) {
+      valid.push(rec);
+    } else {
+      invalid.push(rec);
+    }
+  });
+  return { valid, invalid };
+}
+
+function extractErrorMessage(err) {
+  if (!err) return '';
+  const body = err.body;
+  if (body && typeof body === 'object') {
+    const detailMessage = body?.detail?.message || body?.message;
+    if (typeof detailMessage === 'string' && detailMessage.trim()) return detailMessage.trim();
+    const errorText = body?.error;
+    if (typeof errorText === 'string' && errorText.trim()) return errorText.trim();
+  }
+  if (typeof err.message === 'string' && err.message.trim()) return err.message.trim();
+  if (typeof err === 'string') return err;
+  return '';
+}
+
+function isRetriableError(err) {
+  if (!err) return true;
+  const status = typeof err.status === 'number' ? err.status : Number(err.status);
+  if (!Number.isFinite(status)) return true;
+  return status >= 500;
+}
+
 // --- LocalStorage helpers ---
 function loadJson(key, fallback) {
   try {
@@ -754,16 +876,25 @@ ensureDateTimeValue($('endAt'));
 
 // --- 送信本体 ---
 async function postRecords(records) {
+  if (!Array.isArray(records) || !records.length) {
+    return { ok: true, skipped: 0 };
+  }
   const res = await fetch(API_ENDPOINT, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ records })
   });
   const text = await res.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch {}
   if (!res.ok) {
-    throw new Error(`HTTP ${res.status}: ${text}`);
+    const error = new Error(json?.error || `HTTP ${res.status}`);
+    error.status = res.status;
+    error.body = json ?? text;
+    error.raw = text;
+    throw error;
   }
-  try { return JSON.parse(text); } catch { return { ok: true, raw: text }; }
+  return json ?? { ok: true, raw: text };
 }
 
 function handleSyncResponse(sentRecords, response) {
@@ -868,40 +999,63 @@ form.addEventListener('submit', async (e) => {
       record.downtimeMin = downtimeMin;
     }
 
-    const successText = entryType === 'start' ? '作業開始を登録しました' : '作業完了を登録しました';
-    const queuedText = entryType === 'start' ? '作業開始をキューへ保存しました' : '作業完了をキューへ保存しました';
-    if (navigator.onLine) {
-      try {
-        const response = await postRecords([record]);
-        handleSyncResponse([record], response);
-        msg(successText, true);
-      } catch (err) {
-        if (entryType === 'complete') markStartPending(record.startRecordId, true);
-        await enqueue(record);
-        msg('一時的に失敗。入力内容をキューへ保存しました（オンライン復帰で自動送信）');
-      }
-    } else {
-      if (entryType === 'complete') markStartPending(record.startRecordId, true);
-      await enqueue(record);
-      msg(`オフラインのため${queuedText}`);
+    const prepared = sanitizeRecordForSend(record);
+    if (prepared.planId) {
+      planId = prepared.planId;
+    }
+    if (!validateRecordForSend(prepared)) {
+      msg('入力内容を確認してください');
+      return;
     }
 
-    if (entryType === 'start') {
-      setDateTimeToNow($('startAt'));
-      if (operatorInput) operatorInput.value = '';
-      if (equipmentInput) equipmentInput.value = '';
-      renderStartOptions();
-      if (planId) applyPlanSelection(planId, true);
-    } else {
-      setDateTimeToNow($('endAt'));
-      $('qty').value = '0';
-      $('downtimeMin').value = '0';
-      if (startLinkSelect) {
-        startLinkSelect.value = '';
-        updateStartSummary();
+    const successText = entryType === 'start' ? '作業開始を登録しました' : '作業完了を登録しました';
+    const queuedText = entryType === 'start' ? '作業開始をキューへ保存しました' : '作業完了をキューへ保存しました';
+    let shouldReset = false;
+    if (navigator.onLine) {
+      try {
+        const response = await postRecords([prepared]);
+        handleSyncResponse([prepared], response);
+        msg(successText, true);
+        shouldReset = true;
+      } catch (err) {
+        const retriable = isRetriableError(err);
+        const detail = extractErrorMessage(err);
+        if (entryType === 'complete') {
+          markStartPending(prepared.startRecordId, retriable);
+        }
+        if (retriable) {
+          await enqueue(prepared);
+          msg(detail ? `一時的に失敗: ${detail}（オンライン復帰で再送）` : '一時的に失敗。入力内容をキューへ保存しました（オンライン復帰で自動送信）');
+          shouldReset = true;
+        } else {
+          msg(detail ? `送信エラー: ${detail}` : '送信エラーが発生しました。入力内容を確認してください');
+        }
       }
-      planInput.value = '';
-      renderPlanSummary(null);
+    } else {
+      if (entryType === 'complete') markStartPending(prepared.startRecordId, true);
+      await enqueue(prepared);
+      msg(`オフラインのため${queuedText}`);
+      shouldReset = true;
+    }
+
+    if (shouldReset) {
+      if (entryType === 'start') {
+        setDateTimeToNow($('startAt'));
+        if (operatorInput) operatorInput.value = '';
+        if (equipmentInput) equipmentInput.value = '';
+        renderStartOptions();
+        if (planId) applyPlanSelection(planId, true);
+      } else {
+        setDateTimeToNow($('endAt'));
+        $('qty').value = '0';
+        $('downtimeMin').value = '0';
+        if (startLinkSelect) {
+          startLinkSelect.value = '';
+          updateStartSummary();
+        }
+        planInput.value = '';
+        renderPlanSummary(null);
+      }
     }
   } catch (err) {
     msg('送信エラー: ' + (err?.message || err));
@@ -913,18 +1067,51 @@ form.addEventListener('submit', async (e) => {
 async function flushQueue() {
   const items = await allAndClear();
   if (!items.length) return;
-  try {
-    const response = await postRecords(items);
-    handleSyncResponse(items, response);
-    msg(`キュー ${items.length} 件を送信しました`, true);
-  } catch (e) {
-    for (const it of items) {
-      await enqueue(it);
-      if ((it.entryType || 'start') === 'complete' && it.startRecordId) {
-        markStartPending(it.startRecordId, false);
+  const sanitized = items.map(sanitizeRecordForSend);
+  const { valid, invalid } = splitValidInvalid(sanitized);
+
+  if (invalid.length) {
+    invalid.forEach((rec) => {
+      if ((rec?.entryType || 'start') === 'complete' && rec.startRecordId) {
+        markStartPending(rec.startRecordId, false);
       }
+    });
+    console.warn('Skipped invalid queued records', invalid);
+  }
+
+  if (!valid.length) {
+    msg(`不正なデータ ${invalid.length} 件を破棄しました`, false);
+    return;
+  }
+
+  try {
+    const response = await postRecords(valid);
+    handleSyncResponse(valid, response);
+    const suffix = invalid.length ? `（不正 ${invalid.length} 件は破棄）` : '';
+    msg(`キュー ${valid.length} 件を送信しました${suffix}`, true);
+  } catch (e) {
+    const retriable = isRetriableError(e);
+    const detail = extractErrorMessage(e);
+    if (retriable) {
+      for (const rec of valid) {
+        await enqueue(rec);
+        if ((rec.entryType || 'start') === 'complete' && rec.startRecordId) {
+          markStartPending(rec.startRecordId, true);
+        }
+      }
+      msg(detail ? `再送失敗: ${detail}` : '再送失敗。次回オンライン時に再試行します');
+    } else {
+      if ((e?.status || 0) === 403) {
+        msg(detail ? `再送失敗: ${detail}` : '再送失敗。権限を確認してください');
+      } else {
+        msg(detail ? `再送失敗: ${detail}` : '再送失敗。入力内容を確認してください');
+      }
+      valid.forEach((rec) => {
+        if ((rec.entryType || 'start') === 'complete' && rec.startRecordId) {
+          markStartPending(rec.startRecordId, false);
+        }
+      });
     }
-    msg('再送失敗。次回オンライン時に再試行します');
   }
 }
 
