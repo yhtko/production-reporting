@@ -122,9 +122,6 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
     for (const item of arr) {
       const entryType = item?.entryType === "complete" ? "complete" : "start";
       const planId = String(item?.planId ?? "").trim();
-      if (!planId) continue;
-
-      const equipment = (String(item?.equipment ?? "").trim() || "-");
       const downtimeReason = String(item?.downtimeReason ?? "");
 
       if (entryType === "complete") {
@@ -141,16 +138,17 @@ export const onRequestPost: PagesFunction<Env> = async (context) => {
           quantity: { value: qty },
           downtime_min: { value: downtime },
           downtime_reason: { value: downtimeReason },
-          equipment: { value: equipment },
         };
         completionUpdates.push({ id: startRecordId, record: updateRecord });
         continue;
       }
 
+      if (!planId) continue;
       const startAt = String(item?.startAt ?? "").trim();
       if (!startAt) continue;
       const operator = String(item?.operator ?? "").trim();
       if (!operator) continue;
+      const equipment = (String(item?.equipment ?? "").trim() || "-");
       const record: KintoneRecordLike = {
         plan_id: { value: planId },
         start_at: { value: startAt },

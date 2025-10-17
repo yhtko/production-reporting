@@ -24,14 +24,15 @@
       <label><input type="radio" name="entryType" value="start" checked> 作業開始</label>
       <label><input type="radio" name="entryType" value="complete"> 作業完了</label>
     </fieldset>
-    <div class="row" data-modes="start,complete" data-required="true"><label>Plan ID</label><input id="planId"></div>
+    <div class="row" data-modes="start" data-required="true"><label>Plan ID</label><input id="planId"></div>
     <div class="row" data-modes="complete" data-required="true"><label>開始レポート</label><select id="startLink"><option value="">選択してください</option></select></div>
+    <div class="row" data-modes="complete"><label>開始情報</label><div id="startSummary">未選択</div></div>
     <div class="row" data-modes="start" data-required="true"><label>Start</label><input id="startAt" type="datetime-local"></div>
     <div class="row" data-modes="complete" data-required="true"><label>End</label><input id="endAt" type="datetime-local"></div>
     <div class="row" data-modes="complete" data-required="true"><label>Qty</label><input id="qty" type="number" min="0" step="1" value="0"></div>
     <div class="row" data-modes="complete" data-required="true"><label>Downtime (min)</label><input id="downtimeMin" type="number" min="0" step="1" value="0"></div>
     <div class="row" data-modes="start" data-required="true"><label>Operator</label><input id="operator"></div>
-    <div class="row" data-modes="start,complete"><label>Equipment</label><input id="equipment"></div>
+    <div class="row" data-modes="start" data-required="true"><label>Equipment</label><input id="equipment"></div>
     <div class="row" data-modes="start,complete"><label>Device ID</label><input id="deviceId" placeholder="任意。未入力なら自動割当"></div>
     <button type="submit">送信</button>
     <div id="msg"></div>

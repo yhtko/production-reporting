@@ -43,10 +43,31 @@ const form = $('reportForm');
 const entryModeInputs = Array.from(document.querySelectorAll('input[name="entryType"]'));
 const formRows = Array.from(document.querySelectorAll('#reportForm .row'));
 const startLinkSelect = $('startLink');
+const startSummary = $('startSummary');
 
 const OPEN_STARTS_KEY = 'open-start-records';
 
 const getEntryMode = () => document.querySelector('input[name="entryType"]:checked')?.value || 'start';
+
+function currentLocalDateTimeValue() {
+  const now = new Date();
+  now.setSeconds(0, 0);
+  const offsetMinutes = now.getTimezoneOffset();
+  const local = new Date(now.getTime() - offsetMinutes * 60000);
+  return local.toISOString().slice(0, 16);
+}
+
+function ensureDateTimeValue(input) {
+  if (!input) return;
+  if (!input.value) {
+    input.value = currentLocalDateTimeValue();
+  }
+}
+
+function setDateTimeToNow(input) {
+  if (!input) return;
+  input.value = currentLocalDateTimeValue();
+}
 
 function loadOpenStarts() {
   try {
@@ -77,7 +98,10 @@ function renderStartOptions() {
     const opt = document.createElement('option');
     opt.value = item.recordId;
     const ts = item.startAt ? new Date(item.startAt).toLocaleString() : '開始日時未設定';
-    opt.textContent = `${item.planId} (${ts})`;
+    const operator = item.operator ? `作業者: ${item.operator}` : '作業者: -';
+    const equipment = item.equipment ? `設備: ${item.equipment}` : '設備: -';
+    const plan = item.planId ? `Plan ${item.planId}` : 'Plan 未設定';
+    opt.textContent = `${plan} / ${operator} / ${equipment} / 開始: ${ts}`;
     startLinkSelect.appendChild(opt);
   });
   if (list.some((item) => item.recordId === prev)) {
@@ -85,6 +109,8 @@ function renderStartOptions() {
   } else {
     startLinkSelect.value = '';
   }
+  updateStartSummary();
+  syncPlanIdWithSelection();
 }
 
 function upsertOpenStart(info) {
@@ -129,12 +155,19 @@ function removeOpenStart(recordId) {
 function syncPlanIdWithSelection() {
   if (!startLinkSelect) return;
   const selected = startLinkSelect.value;
-  if (!selected) return;
+  if (!selected) {
+    if (getEntryMode() === 'complete') {
+      $('planId').value = '';
+    }
+    updateStartSummary();
+    return;
+  }
   const list = loadOpenStarts();
   const found = list.find((item) => item.recordId === selected);
   if (found) {
     $('planId').value = found.planId || '';
   }
+  updateStartSummary(found);
 }
 
 function applyEntryMode(mode) {
@@ -165,8 +198,10 @@ function applyEntryMode(mode) {
   if (mode === 'complete') {
     planInput.setAttribute('readonly', 'readonly');
     syncPlanIdWithSelection();
+    ensureDateTimeValue($('endAt'));
   } else {
     planInput.removeAttribute('readonly');
+    ensureDateTimeValue($('startAt'));
   }
   renderStartOptions();
 }
@@ -177,17 +212,39 @@ entryModeInputs.forEach((input) => {
 
 if (startLinkSelect) {
   startLinkSelect.addEventListener('change', () => {
-    const selected = startLinkSelect.value;
-    if (!selected) {
-      $('planId').value = '';
-      return;
-    }
     syncPlanIdWithSelection();
   });
 }
 
 renderStartOptions();
 applyEntryMode(getEntryMode());
+ensureDateTimeValue($('startAt'));
+ensureDateTimeValue($('endAt'));
+
+function updateStartSummary(info) {
+  if (!startSummary) return;
+  const details = info;
+  if (!details) {
+    const selected = startLinkSelect?.value;
+    if (selected) {
+      const list = loadOpenStarts();
+      const found = list.find((item) => item.recordId === selected);
+      if (found) {
+        return updateStartSummary(found);
+      }
+    }
+    startSummary.textContent = '未選択';
+    return;
+  }
+  const ts = details.startAt ? new Date(details.startAt).toLocaleString() : '開始日時未設定';
+  const parts = [
+    details.planId ? `Plan ${details.planId}` : null,
+    details.operator ? `作業者: ${details.operator}` : null,
+    details.equipment ? `設備: ${details.equipment}` : null,
+    ts ? `開始: ${ts}` : null,
+  ].filter(Boolean);
+  startSummary.textContent = parts.join(' / ') || '未選択';
+}
 
 // --- 送信本体 ---
 async function postRecords(records) {
@@ -250,8 +307,8 @@ form.addEventListener('submit', async (e) => {
       const d = new Date(val);
       return d.toISOString();
     };
-    const planId = $('planId').value.trim();
-    if (!planId) { msg('Plan ID は必須です'); return; }
+    const planInput = $('planId');
+    let planId = planInput.value.trim();
 
     const operator = $('operator').value.trim();
     const equipment = $('equipment').value.trim();
@@ -259,9 +316,11 @@ form.addEventListener('submit', async (e) => {
     const startAt = entryType === 'start' ? toIso($('startAt').value) : '';
     const endAt = entryType === 'complete' ? toIso($('endAt').value) : '';
 
+    if (entryType === 'start' && !planId) { msg('Plan ID は必須です'); return; }
     if (entryType === 'start' && !startAt) { msg('作業開始日時を入力してください'); return; }
-    if (entryType === 'complete' && !endAt) { msg('作業完了日時を入力してください'); return; }
     if (entryType === 'start' && !operator) { msg('作業者を入力してください'); return; }
+    if (entryType === 'start' && !equipment) { msg('設備を入力してください'); return; }
+    if (entryType === 'complete' && !endAt) { msg('作業完了日時を入力してください'); return; }
 
     if (startAt && endAt && new Date(startAt) > new Date(endAt)) {
       msg('完了日時は開始日時以降にしてください'); return;
@@ -277,14 +336,29 @@ form.addEventListener('submit', async (e) => {
       msg('ダウンタイムは0以上の数値で入力してください'); return;
     }
 
-    const record = { planId, startAt, endAt, qty, downtimeMin, operator, equipment, entryType };
-    if (entryType === 'complete') {
+    const record = { entryType };
+    if (planId) record.planId = planId;
+
+    if (entryType === 'start') {
+      record.startAt = startAt;
+      record.operator = operator;
+      record.equipment = equipment;
+    } else {
       const startRecordId = $('startLink').value;
       if (!startRecordId) {
         msg('開始レポートを選択してください');
         return;
       }
+      const list = loadOpenStarts();
+      const found = list.find((item) => item.recordId === startRecordId);
+      if (found && found.planId) {
+        planId = found.planId;
+        record.planId = planId;
+      }
       record.startRecordId = startRecordId;
+      record.endAt = endAt;
+      record.qty = qty;
+      record.downtimeMin = downtimeMin;
     }
     console.log('POST payload', { entryType, records:[record] });
     const successText = entryType === 'start' ? '作業開始を登録しました' : '作業完了を登録しました';
@@ -306,14 +380,18 @@ form.addEventListener('submit', async (e) => {
       msg(`オフラインのため${queuedText}`);
     }
     if (entryType === 'start') {
-      $('startAt').value = '';
+      setDateTimeToNow($('startAt'));
       $('operator').value = '';
+      $('equipment').value = '';
       renderStartOptions();
     } else {
-      $('endAt').value = '';
+      setDateTimeToNow($('endAt'));
       $('qty').value = '0';
       $('downtimeMin').value = '0';
-      if (startLinkSelect) startLinkSelect.value = '';
+      if (startLinkSelect) {
+        startLinkSelect.value = '';
+        updateStartSummary();
+      }
       $('planId').value = '';
     }
   } catch (e) {
