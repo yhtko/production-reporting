@@ -1090,20 +1090,14 @@ form.addEventListener('submit', async (e) => {
     if (entryType === 'complete' && (!Number.isFinite(downtimeMin) || downtimeMin < 0)) {
       msg('ダウンタイムは0以上の数値で入力してください'); return;
     }
-    if (entryType === 'complete' && (!Number.isFinite(downtimeMin) || downtimeMin < 0)) {
-      msg('ダウンタイムは0以上の数値で入力してください'); return;
-    }
 
-    const record = { entryType };
-    if (planId) record.planId = planId;
-
-    const record = { entryType };
-    if (planId) record.planId = planId;
+    const submission = { entryType };
+    if (planId) submission.planId = planId;
 
     if (entryType === 'start') {
-      record.startAt = startAt;
-      record.operator = operator;
-      record.equipment = equipment;
+      submission.startAt = startAt;
+      submission.operator = operator;
+      submission.equipment = equipment;
     } else {
       const startRecordId = $('startLink')?.value;
       if (!startRecordId) {
@@ -1114,15 +1108,15 @@ form.addEventListener('submit', async (e) => {
       const found = list.find((item) => item.recordId === startRecordId);
       if (found && found.planId) {
         planId = found.planId;
-        record.planId = planId;
+        submission.planId = planId;
       }
-      record.startRecordId = startRecordId;
-      record.endAt = endAt;
-      record.qty = qty;
-      record.downtimeMin = downtimeMin;
+      submission.startRecordId = startRecordId;
+      submission.endAt = endAt;
+      submission.qty = qty;
+      submission.downtimeMin = downtimeMin;
     }
 
-    const prepared = sanitizeRecordForSend(record);
+    const prepared = sanitizeRecordForSend(submission);
     if (prepared.planId) {
       planId = prepared.planId;
     }
