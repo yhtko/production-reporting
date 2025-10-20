@@ -74,7 +74,6 @@ let startFormAutoOpen = false;
 const OPEN_STARTS_KEY = 'open-start-records';
 const FORM_META_KEY = 'kintone-form-meta';
 const LOOKUP_CACHE_PREFIX = 'lookup-cache:';
-const LOOKUP_FALLBACK_KEY = 'lookup-fallback-config';
 
 const getEntryMode = () => (currentView === 'start' ? 'start' : 'complete');
 
@@ -286,7 +285,6 @@ function saveOpenStarts(list) {
 // --- kintone メタ/lookup 関連 ---
 let formProperties = {};
 const lookupStates = new Map();
-const lookupFallbackConfigs = new Map();
 
 function createLookupState(fieldCode, input, listEl, options = {}) {
   if (!fieldCode || !input || !listEl) return null;
@@ -336,101 +334,6 @@ const operatorLookupState = createLookupState(operatorFieldCode, operatorInput, 
 const equipmentFieldCode = equipmentInput?.dataset.kintoneCode || 'equipment';
 const equipmentLookupState = createLookupState(equipmentFieldCode, equipmentInput, equipmentOptionsList);
 
-function normalizeFieldCodes(list) {
-  if (Array.isArray(list)) {
-    return uniqueList(
-      list
-        .map((entry) => {
-          if (typeof entry === 'string') return entry.trim();
-          if (entry && typeof entry === 'object') {
-            const maybe = entry.field || entry.code || entry.fieldCode;
-            if (typeof maybe === 'string') return maybe.trim();
-          }
-          return '';
-        })
-        .filter(Boolean)
-    );
-  }
-  if (typeof list === 'string') {
-    return uniqueList([list.trim()].filter(Boolean));
-  }
-  return [];
-}
-
-function normalizeFieldMappings(list) {
-  if (!Array.isArray(list)) return [];
-  return list
-    .map((item) => {
-      if (!item || typeof item !== 'object') return null;
-      const field = typeof item.field === 'string' ? item.field.trim() : '';
-      const relatedField = typeof item.relatedField === 'string' ? item.relatedField.trim() : '';
-      if (!field || !relatedField) return null;
-      return { field, relatedField };
-    })
-    .filter(Boolean);
-}
-
-function applyLookupFallbacks(raw, options = {}) {
-  const { refresh = true } = options;
-  lookupFallbackConfigs.clear();
-  if (raw && typeof raw === 'object') {
-    Object.entries(raw).forEach(([fieldCode, value]) => {
-      if (!value || typeof value !== 'object') return;
-      const relatedAppRaw = value.relatedApp ?? value.app;
-      let relatedApp = '';
-      if (typeof relatedAppRaw === 'string') {
-        relatedApp = relatedAppRaw.trim();
-      } else if (relatedAppRaw && typeof relatedAppRaw === 'object' && typeof relatedAppRaw.app === 'string') {
-        relatedApp = relatedAppRaw.app.trim();
-      }
-      const keyRaw = value.relatedKeyField ?? value.key;
-      const relatedKeyField = typeof keyRaw === 'string' ? keyRaw.trim() : '';
-      if (!relatedApp || !relatedKeyField) return;
-      const displayFields = uniqueList([
-        ...normalizeFieldCodes(value.displayFields),
-        ...normalizeFieldCodes(value.display),
-      ]);
-      const pickerFields = uniqueList([
-        ...normalizeFieldCodes(value.pickerFields),
-        ...normalizeFieldCodes(value.queryFields),
-        ...displayFields,
-      ]);
-      const fieldMappings = normalizeFieldMappings(value.fieldMappings || value.mappings || []);
-      const mappedFields = fieldMappings.map((m) => m.relatedField);
-      const fieldSet = uniqueList([
-        relatedKeyField,
-        ...displayFields,
-        ...pickerFields,
-        ...mappedFields,
-        '$id',
-      ]);
-      lookupFallbackConfigs.set(fieldCode, {
-        fieldCode,
-        relatedApp,
-        relatedKeyField,
-        pickerFields,
-        displayFields,
-        fieldMappings,
-        fieldSet,
-      });
-    });
-  }
-  if (refresh) {
-    refreshLookupConfigs();
-  }
-}
-
-function loadLookupFallbacks() {
-  const cached = loadJson(LOOKUP_FALLBACK_KEY, null);
-  if (!cached || typeof cached !== 'object') return;
-  const entries = cached.lookups && typeof cached.lookups === 'object' ? cached.lookups : cached;
-  applyLookupFallbacks(entries, { refresh: false });
-}
-
-function persistLookupFallbacks(raw) {
-  saveJson(LOOKUP_FALLBACK_KEY, { lookups: raw });
-}
-
 function loadCachedFormProperties() {
   const cached = loadJson(FORM_META_KEY, null);
   if (cached && typeof cached === 'object' && cached.properties) {
@@ -464,26 +367,7 @@ function parseDatasetFields(input, attrName) {
 }
 
 function deriveLookupConfig(state) {
-  if (!state?.fieldCode) return null;
-  if (lookupFallbackConfigs.has(state.fieldCode)) {
-    const base = lookupFallbackConfigs.get(state.fieldCode);
-    if (!base) return null;
-    const datasetFields = uniqueList([
-      ...parseDatasetFields(state.input, 'displayFields'),
-      ...parseDatasetFields(state.input, 'lookupDisplayFields'),
-    ]);
-    if (!datasetFields.length) return base;
-    const displayFields = uniqueList([
-      ...(Array.isArray(base.displayFields) ? base.displayFields : []),
-      ...datasetFields,
-    ]);
-    const fieldSet = uniqueList([
-      ...(Array.isArray(base.fieldSet) ? base.fieldSet : []),
-      ...datasetFields,
-    ]);
-    return { ...base, displayFields, fieldSet };
-  }
-  if (!formProperties || typeof formProperties !== 'object') return null;
+  if (!state?.fieldCode || !formProperties || typeof formProperties !== 'object') return null;
   const fieldCode = state.fieldCode;
   for (const key of Object.keys(formProperties)) {
     const prop = formProperties[key];
@@ -680,21 +564,6 @@ async function fetchFormProperties() {
     }
   } catch (e) {
     console.warn('failed to fetch form properties', e);
-  }
-}
-
-async function fetchLookupFallbacks() {
-  try {
-    const params = new URLSearchParams({ type: 'lookup-config' });
-    const res = await fetch(`${API_ENDPOINT}?${params.toString()}`);
-    if (!res.ok) throw new Error(await res.text());
-    const json = await res.json();
-    if (!json || typeof json !== 'object') return;
-    const entries = json.lookups && typeof json.lookups === 'object' ? json.lookups : json;
-    applyLookupFallbacks(entries);
-    persistLookupFallbacks(entries);
-  } catch (e) {
-    console.warn('failed to fetch lookup config', e);
   }
 }
 
@@ -1337,9 +1206,7 @@ if (equipmentInput) {
   });
 }
 
-loadLookupFallbacks();
 loadCachedFormProperties();
-refreshLookupConfigs();
 renderPlanSummary(null);
 renderActiveCards();
 showMainView();
@@ -1636,7 +1503,6 @@ async function flushQueue() {
 // --- 初期ロードでサーバ同期を試行 ---
 if (navigator.onLine) {
   refreshOpenStartsFromServer();
-  fetchLookupFallbacks();
   fetchFormProperties();
   flushQueue();
 }
@@ -1644,7 +1510,6 @@ if (navigator.onLine) {
 window.addEventListener('online', () => {
   flushQueue();
   refreshOpenStartsFromServer();
-  fetchLookupFallbacks();
   fetchFormProperties();
   if (planInput?.value) {
     applyPlanSelection(planInput.value.trim(), true);

@@ -7,7 +7,6 @@ export interface Env {
   KINTONE_TOKEN_LOG_UPDATE?: string; // 実績アプリのAPIトークン（更新権限）
   KINTONE_TOKEN_LUP?: string; // 参照元(lookup)アプリのAPIトークン（閲覧権限）
   KINTONE_FORM_SCHEMA?: string; // form APIが使えない場合のフォールバックJSON
-  KINTONE_LOOKUP_CONFIG?: string; // ルックアップ設定のフォールバックJSON
 }
 function safeJson(s: string) {
   try { return JSON.parse(s); } catch { return s; }
@@ -71,121 +70,6 @@ type FormProperties = Record<string, any> & {
 let cachedFormDefinition: FormProperties | null = null;
 let cachedFormFetchedAt = 0;
 const FORM_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
-
-type FieldMapping = { field: string; relatedField: string };
-type ResolvedLookupConfig = {
-  fieldCode: string;
-  relatedApp: string;
-  relatedKeyField: string;
-  pickerFields: string[];
-  displayFields: string[];
-  fieldMappings: FieldMapping[];
-  fieldSet: string[];
-};
-
-let cachedLookupConfig: Record<string, ResolvedLookupConfig> | null = null;
-let cachedLookupConfigSource = "";
-
-function normalizeFieldList(list: unknown): string[] {
-  if (!Array.isArray(list)) return [];
-  const result: string[] = [];
-  for (const entry of list) {
-    if (typeof entry === "string") {
-      const trimmed = entry.trim();
-      if (trimmed) result.push(trimmed);
-      continue;
-    }
-    if (entry && typeof entry === "object") {
-      const maybeField = (entry as any).field ?? (entry as any).code ?? (entry as any).fieldCode;
-      if (typeof maybeField === "string") {
-        const trimmed = maybeField.trim();
-        if (trimmed) result.push(trimmed);
-      }
-    }
-  }
-  return result;
-}
-
-function normalizeMappings(list: unknown): FieldMapping[] {
-  if (!Array.isArray(list)) return [];
-  const result: FieldMapping[] = [];
-  for (const entry of list) {
-    if (!entry || typeof entry !== "object") continue;
-    const field = typeof (entry as any).field === "string" ? (entry as any).field.trim() : "";
-    const relatedField = typeof (entry as any).relatedField === "string" ? (entry as any).relatedField.trim() : "";
-    if (field && relatedField) {
-      result.push({ field, relatedField });
-    }
-  }
-  return result;
-}
-
-function loadStaticLookupConfig(env: Env): Record<string, ResolvedLookupConfig> {
-  if (cachedLookupConfig && cachedLookupConfigSource === env.KINTONE_LOOKUP_CONFIG) {
-    return cachedLookupConfig;
-  }
-  const raw = env.KINTONE_LOOKUP_CONFIG;
-  if (!raw) {
-    cachedLookupConfig = {};
-    cachedLookupConfigSource = "";
-    return cachedLookupConfig;
-  }
-  try {
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") {
-      cachedLookupConfig = {};
-      cachedLookupConfigSource = raw;
-      return cachedLookupConfig;
-    }
-    const result: Record<string, ResolvedLookupConfig> = {};
-    Object.entries(parsed as Record<string, unknown>).forEach(([fieldCode, value]) => {
-      if (!value || typeof value !== "object") return;
-      const relatedAppRaw = (value as any).relatedApp ?? (value as any).app;
-      const relatedApp = typeof relatedAppRaw === "string" ? relatedAppRaw.trim() :
-        (relatedAppRaw && typeof relatedAppRaw === "object" && typeof (relatedAppRaw as any).app === "string")
-          ? String((relatedAppRaw as any).app).trim()
-          : "";
-      const relatedKeyFieldRaw = (value as any).relatedKeyField ?? (value as any).key;
-      const relatedKeyField = typeof relatedKeyFieldRaw === "string" ? relatedKeyFieldRaw.trim() : "";
-      if (!relatedApp || !relatedKeyField) return;
-      const displayFields = unique([
-        ...normalizeFieldList((value as any).displayFields),
-        ...normalizeFieldList((value as any).display),
-      ]);
-      const pickerFields = unique([
-        ...normalizeFieldList((value as any).pickerFields),
-        ...normalizeFieldList((value as any).queryFields),
-        ...displayFields,
-      ]);
-      const fieldMappings = normalizeMappings((value as any).fieldMappings ?? (value as any).mappings);
-      const mappedFields = fieldMappings.map((m) => m.relatedField);
-      const fieldSet = unique([
-        relatedKeyField,
-        ...displayFields,
-        ...pickerFields,
-        ...mappedFields,
-        "$id",
-      ]);
-      result[fieldCode] = {
-        fieldCode,
-        relatedApp,
-        relatedKeyField,
-        pickerFields,
-        displayFields,
-        fieldMappings,
-        fieldSet,
-      };
-    });
-    cachedLookupConfig = result;
-    cachedLookupConfigSource = raw;
-    return cachedLookupConfig;
-  } catch (err) {
-    console.warn("failed to parse KINTONE_LOOKUP_CONFIG", err);
-    cachedLookupConfig = {};
-    cachedLookupConfigSource = raw;
-    return cachedLookupConfig;
-  }
-}
 
 function loadStaticFormDefinition(env: Env): FormProperties | null {
   const raw = env.KINTONE_FORM_SCHEMA;
@@ -344,14 +228,6 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       return new Response(JSON.stringify({ records: simplified }), { status: 200, headers: JSON_CORS_HEADERS });
     }
 
-    if (type === "lookup-config") {
-      const staticConfig = loadStaticLookupConfig(context.env);
-      return new Response(
-        JSON.stringify({ lookups: staticConfig }),
-        { status: 200, headers: JSON_CORS_HEADERS },
-      );
-    }
-
     const formDef = await fetchFormDefinition(context, forceRefresh);
     const properties = formDef.properties as Record<string, any>;
 
@@ -367,42 +243,20 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       return mappings.some((m: any) => m?.field === planFieldCode);
     });
 
-    let resolved: ResolvedLookupConfig | null = null;
-    if (lookupEntry && lookupEntry.lookup) {
-      const lookup = lookupEntry.lookup;
-      const relatedApp = lookup?.relatedApp?.app;
-      const relatedKeyField = lookup?.relatedKeyField;
-      if (relatedApp && relatedKeyField) {
-        const pickerFields: string[] = normalizeFieldList(lookup?.lookupPickerFields);
-        const fieldMappings = normalizeMappings(lookup?.fieldMappings);
-        const mappedFields = fieldMappings.map((m) => m.relatedField);
-        const displayFields = unique([
-          ...pickerFields,
-          ...mappedFields,
-        ]);
-        const fieldSet = unique([relatedKeyField, ...displayFields, "$id"]);
-        resolved = {
-          fieldCode: planFieldCode,
-          relatedApp,
-          relatedKeyField,
-          pickerFields,
-          displayFields,
-          fieldMappings,
-          fieldSet,
-        };
-      }
-    }
-
-    if (!resolved) {
-      const staticConfig = loadStaticLookupConfig(context.env);
-      resolved = staticConfig[planFieldCode] ?? null;
-    }
-
-    if (!resolved) {
+    if (!lookupEntry) {
       return new Response(JSON.stringify({ error: "lookup not configured for field" }), { status: 404, headers: JSON_CORS_HEADERS });
     }
 
-    const { relatedApp, relatedKeyField, pickerFields, fieldSet } = resolved;
+    const lookup = lookupEntry.lookup;
+    const relatedApp = lookup?.relatedApp?.app;
+    const relatedKeyField = lookup?.relatedKeyField;
+    if (!relatedApp || !relatedKeyField) {
+      return new Response(JSON.stringify({ error: "lookup definition incomplete" }), { status: 500, headers: JSON_CORS_HEADERS });
+    }
+
+    const pickerFields: string[] = normalizeFieldList(lookup?.lookupPickerFields);
+    const mappingFields: string[] = Array.isArray(lookup?.fieldMappings) ? lookup.fieldMappings.map((m: any) => m?.relatedField).filter((v: any) => typeof v === "string") : [];
+    const fieldSet = unique([relatedKeyField, ...pickerFields, ...mappingFields]);
 
     if (type === "lookup-record") {
       const value = url.searchParams.get("value") ?? "";
