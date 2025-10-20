@@ -26,14 +26,14 @@
     .card.selected{border-color:#1976d2;box-shadow:0 0 0 2px rgba(25,118,210,0.2)}
     .card:focus-visible{outline:3px solid rgba(25,118,210,0.4)}
     .summary{background:#eef5ff;padding:12px;border-radius:8px;font-size:14px;color:#123}
-    .start-panel{position:fixed;inset:0;padding:24px;display:flex;align-items:flex-start;justify-content:center;background:rgba(0,0,0,0.35);z-index:10;overflow:auto}
-    .start-panel.hidden{display:none}
-    .start-panel__content{margin:40px auto 80px;width:100%;max-width:520px}
+    .start-panel,.complete-panel{position:fixed;inset:0;padding:24px;display:flex;align-items:flex-start;justify-content:center;background:rgba(0,0,0,0.35);z-index:10;overflow:auto}
+    .start-panel.hidden,.complete-panel.hidden{display:none}
+    .start-panel__content,.complete-panel__content{margin:40px auto 80px;width:100%;max-width:520px}
     @media (max-width:600px){
       .row{grid-template-columns:1fr}
       .row label{font-weight:600}
       form{padding:16px 14px}
-      .start-panel__content{margin:24px auto}
+      .start-panel__content,.complete-panel__content{margin:24px auto}
     }
   </style>
 </head>
@@ -50,14 +50,6 @@
       <h2>作業中一覧</h2>
       <div id="activeCards" class="cards"></div>
     </div>
-    <form id="completeForm" class="hidden">
-      <h3>作業完了入力</h3>
-      <div id="completionSummary" class="summary">作業中カードを選択してください</div>
-      <div class="row"><label>完了日時</label><input id="endAt" type="datetime-local"></div>
-      <div class="row"><label>個数</label><input id="qty" type="number" min="0" step="1" value="0"></div>
-      <div class="row"><label>ダウンタイム (分)</label><input id="downtimeMin" type="number" min="0" step="1" value="0"></div>
-      <button type="submit">作業完了を登録</button>
-    </form>
   </section>
 
   <section id="startPanel" class="start-panel hidden" role="dialog" aria-modal="true" aria-labelledby="startPanelTitle" aria-hidden="true">
@@ -73,6 +65,22 @@
         <div class="actions">
           <button type="submit">作業開始を登録</button>
           <button type="button" id="closeStartForm">閉じる</button>
+        </div>
+      </form>
+    </div>
+  </section>
+
+  <section id="completePanel" class="complete-panel hidden" role="dialog" aria-modal="true" aria-labelledby="completePanelTitle" aria-hidden="true">
+    <div class="complete-panel__content">
+      <form id="completeForm" class="hidden">
+        <h2 id="completePanelTitle">作業完了</h2>
+        <div id="completionSummary" class="summary">作業中カードを選択してください</div>
+        <div class="row"><label>完了日時</label><input id="endAt" type="datetime-local"></div>
+        <div class="row"><label>個数</label><input id="qty" type="number" min="0" step="1" value="0"></div>
+        <div class="row"><label>ダウンタイム (分)</label><input id="downtimeMin" type="number" min="0" step="1" value="0"></div>
+        <div class="actions">
+          <button type="submit">作業完了を登録</button>
+          <button type="button" id="closeCompleteForm">閉じる</button>
         </div>
       </form>
     </div>
