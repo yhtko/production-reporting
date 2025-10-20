@@ -1063,6 +1063,7 @@ document.addEventListener('keydown', (event) => {
     event.preventDefault();
     hideStartForm({ manual: true });
   }
+});
 
 if (refreshActiveBtn) {
   refreshActiveBtn.addEventListener('click', () => {
