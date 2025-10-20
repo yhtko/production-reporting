@@ -465,24 +465,6 @@ function parseDatasetFields(input, attrName) {
 
 function deriveLookupConfig(state) {
   if (!state?.fieldCode) return null;
-  if (lookupFallbackConfigs.has(state.fieldCode)) {
-    const base = lookupFallbackConfigs.get(state.fieldCode);
-    if (!base) return null;
-    const datasetFields = uniqueList([
-      ...parseDatasetFields(state.input, 'displayFields'),
-      ...parseDatasetFields(state.input, 'lookupDisplayFields'),
-    ]);
-    if (!datasetFields.length) return base;
-    const displayFields = uniqueList([
-      ...(Array.isArray(base.displayFields) ? base.displayFields : []),
-      ...datasetFields,
-    ]);
-    const fieldSet = uniqueList([
-      ...(Array.isArray(base.fieldSet) ? base.fieldSet : []),
-      ...datasetFields,
-    ]);
-    return { ...base, displayFields, fieldSet };
-  }
   if (!formProperties || typeof formProperties !== 'object') return null;
   const fieldCode = state.fieldCode;
   for (const key of Object.keys(formProperties)) {
