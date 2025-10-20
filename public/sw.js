@@ -1,5 +1,6 @@
-const CACHE = 'pr-cache-v3';
-const ASSETS = ['/', '/index.html', '/app.js', '/manifest.webmanifest'];
+const CACHE = 'pr-cache-v4';
+const NAVIGATION_FALLBACK = '/index.html';
+const ASSETS = ['/', NAVIGATION_FALLBACK, '/app.js', '/manifest.webmanifest'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -45,14 +46,16 @@ self.addEventListener('fetch', (e) => {
     e.respondWith(
       (async () => {
         try {
-          const networkResponse = await fetch(request);
+          const networkRequest = new Request(request.url, { cache: 'no-store', credentials: request.credentials });
+          const networkResponse = await fetch(networkRequest);
           const cache = await caches.open(CACHE);
-          cache.put(request, networkResponse.clone());
+          await cache.put(new Request(request.url), networkResponse.clone());
+          await cache.put(new Request(NAVIGATION_FALLBACK), networkResponse.clone());
           return networkResponse;
         } catch (error) {
           const cached = await caches.match(request);
           if (cached) return cached;
-          return caches.match('/index.html');
+          return caches.match(NAVIGATION_FALLBACK);
         }
       })()
     );
@@ -71,7 +74,7 @@ self.addEventListener('fetch', (e) => {
           }
           return res;
         })
-        .catch(() => caches.match('/index.html'));
+        .catch(() => caches.match(NAVIGATION_FALLBACK));
     })
   );
 });

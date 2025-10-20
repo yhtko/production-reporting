@@ -1642,12 +1642,24 @@ document.addEventListener('visibilitychange', () => {
 });
 
 if ('serviceWorker' in navigator) {
+  let swRefreshing = false;
+  const triggerReload = () => {
+    if (swRefreshing) return;
+    swRefreshing = true;
+    window.location.reload();
+  };
   navigator.serviceWorker.register('/sw.js').catch(() => {});
   navigator.serviceWorker.addEventListener('message', (event) => {
     if (event.data && event.data.type === 'SW_RELOAD') {
-      window.location.reload();
+      triggerReload();
     }
   });
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    triggerReload();
+  });
+  navigator.serviceWorker.ready
+    .then((registration) => registration.update().catch(() => {}))
+    .catch(() => {});
 }
 
 window.addEventListener('offline', () => {
