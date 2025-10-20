@@ -49,12 +49,14 @@ const msg = (t, ok = false) => {
 
 const mainView = $('mainView');
 const startPanel = $('startPanel');
+const completePanel = $('completePanel');
 const startForm = $('startForm');
 const completeForm = $('completeForm');
 const activeCardsContainer = $('activeCards');
 const completionSummary = $('completionSummary');
 const openStartFormBtn = $('openStartForm');
 const closeStartFormBtn = $('closeStartForm');
+const closeCompleteFormBtn = $('closeCompleteForm');
 const refreshActiveBtn = $('refreshActive');
 const planSummary = $('planSummary');
 const planInput = $('planId');
@@ -72,8 +74,25 @@ let startFormAutoOpen = false;
 const OPEN_STARTS_KEY = 'open-start-records';
 const FORM_META_KEY = 'kintone-form-meta';
 const LOOKUP_CACHE_PREFIX = 'lookup-cache:';
+const LOOKUP_FALLBACK_KEY = 'lookup-fallback-config';
 
 const getEntryMode = () => (currentView === 'start' ? 'start' : 'complete');
+
+function getFormCacheBust() {
+  try {
+    const key = 'form-cache-bust';
+    if (window.sessionStorage) {
+      const existing = window.sessionStorage.getItem(key);
+      if (existing) return existing;
+      const generated = String(Date.now());
+      window.sessionStorage.setItem(key, generated);
+      return generated;
+    }
+  } catch (err) {
+    console.warn('failed to access sessionStorage', err);
+  }
+  return String(Date.now());
+}
 
 function currentLocalDateTimeValue() {
   const now = new Date();
@@ -267,6 +286,7 @@ function saveOpenStarts(list) {
 // --- kintone メタ/lookup 関連 ---
 let formProperties = {};
 const lookupStates = new Map();
+const lookupFallbackConfigs = new Map();
 
 function createLookupState(fieldCode, input, listEl, options = {}) {
   if (!fieldCode || !input || !listEl) return null;
@@ -316,6 +336,101 @@ const operatorLookupState = createLookupState(operatorFieldCode, operatorInput, 
 const equipmentFieldCode = equipmentInput?.dataset.kintoneCode || 'equipment';
 const equipmentLookupState = createLookupState(equipmentFieldCode, equipmentInput, equipmentOptionsList);
 
+function normalizeFieldCodes(list) {
+  if (Array.isArray(list)) {
+    return uniqueList(
+      list
+        .map((entry) => {
+          if (typeof entry === 'string') return entry.trim();
+          if (entry && typeof entry === 'object') {
+            const maybe = entry.field || entry.code || entry.fieldCode;
+            if (typeof maybe === 'string') return maybe.trim();
+          }
+          return '';
+        })
+        .filter(Boolean)
+    );
+  }
+  if (typeof list === 'string') {
+    return uniqueList([list.trim()].filter(Boolean));
+  }
+  return [];
+}
+
+function normalizeFieldMappings(list) {
+  if (!Array.isArray(list)) return [];
+  return list
+    .map((item) => {
+      if (!item || typeof item !== 'object') return null;
+      const field = typeof item.field === 'string' ? item.field.trim() : '';
+      const relatedField = typeof item.relatedField === 'string' ? item.relatedField.trim() : '';
+      if (!field || !relatedField) return null;
+      return { field, relatedField };
+    })
+    .filter(Boolean);
+}
+
+function applyLookupFallbacks(raw, options = {}) {
+  const { refresh = true } = options;
+  lookupFallbackConfigs.clear();
+  if (raw && typeof raw === 'object') {
+    Object.entries(raw).forEach(([fieldCode, value]) => {
+      if (!value || typeof value !== 'object') return;
+      const relatedAppRaw = value.relatedApp ?? value.app;
+      let relatedApp = '';
+      if (typeof relatedAppRaw === 'string') {
+        relatedApp = relatedAppRaw.trim();
+      } else if (relatedAppRaw && typeof relatedAppRaw === 'object' && typeof relatedAppRaw.app === 'string') {
+        relatedApp = relatedAppRaw.app.trim();
+      }
+      const keyRaw = value.relatedKeyField ?? value.key;
+      const relatedKeyField = typeof keyRaw === 'string' ? keyRaw.trim() : '';
+      if (!relatedApp || !relatedKeyField) return;
+      const displayFields = uniqueList([
+        ...normalizeFieldCodes(value.displayFields),
+        ...normalizeFieldCodes(value.display),
+      ]);
+      const pickerFields = uniqueList([
+        ...normalizeFieldCodes(value.pickerFields),
+        ...normalizeFieldCodes(value.queryFields),
+        ...displayFields,
+      ]);
+      const fieldMappings = normalizeFieldMappings(value.fieldMappings || value.mappings || []);
+      const mappedFields = fieldMappings.map((m) => m.relatedField);
+      const fieldSet = uniqueList([
+        relatedKeyField,
+        ...displayFields,
+        ...pickerFields,
+        ...mappedFields,
+        '$id',
+      ]);
+      lookupFallbackConfigs.set(fieldCode, {
+        fieldCode,
+        relatedApp,
+        relatedKeyField,
+        pickerFields,
+        displayFields,
+        fieldMappings,
+        fieldSet,
+      });
+    });
+  }
+  if (refresh) {
+    refreshLookupConfigs();
+  }
+}
+
+function loadLookupFallbacks() {
+  const cached = loadJson(LOOKUP_FALLBACK_KEY, null);
+  if (!cached || typeof cached !== 'object') return;
+  const entries = cached.lookups && typeof cached.lookups === 'object' ? cached.lookups : cached;
+  applyLookupFallbacks(entries, { refresh: false });
+}
+
+function persistLookupFallbacks(raw) {
+  saveJson(LOOKUP_FALLBACK_KEY, { lookups: raw });
+}
+
 function loadCachedFormProperties() {
   const cached = loadJson(FORM_META_KEY, null);
   if (cached && typeof cached === 'object' && cached.properties) {
@@ -338,25 +453,73 @@ function persistFormProperties(full) {
   saveJson(FORM_META_KEY, full);
 }
 
-function deriveLookupConfig(fieldCode) {
-  if (!fieldCode || !formProperties || typeof formProperties !== 'object') return null;
+function parseDatasetFields(input, attrName) {
+  if (!input) return [];
+  const value = input.dataset?.[attrName];
+  if (!value) return [];
+  return value
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function deriveLookupConfig(state) {
+  if (!state?.fieldCode) return null;
+  if (lookupFallbackConfigs.has(state.fieldCode)) {
+    const base = lookupFallbackConfigs.get(state.fieldCode);
+    if (!base) return null;
+    const datasetFields = uniqueList([
+      ...parseDatasetFields(state.input, 'displayFields'),
+      ...parseDatasetFields(state.input, 'lookupDisplayFields'),
+    ]);
+    if (!datasetFields.length) return base;
+    const displayFields = uniqueList([
+      ...(Array.isArray(base.displayFields) ? base.displayFields : []),
+      ...datasetFields,
+    ]);
+    const fieldSet = uniqueList([
+      ...(Array.isArray(base.fieldSet) ? base.fieldSet : []),
+      ...datasetFields,
+    ]);
+    return { ...base, displayFields, fieldSet };
+  }
+  if (!formProperties || typeof formProperties !== 'object') return null;
+  const fieldCode = state.fieldCode;
   for (const key of Object.keys(formProperties)) {
     const prop = formProperties[key];
-    if (!prop || prop.type !== 'LOOKUP' || !prop.lookup) continue;
+    if (!prop || !prop.lookup) continue;
     const mappings = Array.isArray(prop.lookup.fieldMappings) ? prop.lookup.fieldMappings : [];
     if (!mappings.some((m) => m?.field === fieldCode)) continue;
     const relatedApp = prop.lookup.relatedApp?.app;
     const relatedKeyField = prop.lookup.relatedKeyField;
     if (!relatedApp || !relatedKeyField) continue;
     const pickerFields = Array.isArray(prop.lookup.lookupPickerFields)
-      ? prop.lookup.lookupPickerFields.filter((v) => typeof v === 'string')
+      ? prop.lookup.lookupPickerFields
+        .map((entry) => {
+          if (typeof entry === 'string') return entry.trim();
+          if (entry && typeof entry === 'object') {
+            const maybeField = entry.field || entry.code || entry.fieldCode;
+            if (typeof maybeField === 'string') return maybeField.trim();
+          }
+          return '';
+        })
+        .filter(Boolean)
       : [];
     const fieldMappings = mappings
       .filter((m) => m && typeof m.field === 'string' && typeof m.relatedField === 'string')
       .map((m) => ({ field: m.field, relatedField: m.relatedField }));
     const mappedFields = fieldMappings.map((m) => m.relatedField);
-    const fieldSet = uniqueList([relatedKeyField, ...pickerFields, ...mappedFields, '$id']);
-    return { fieldCode, relatedApp, relatedKeyField, pickerFields, fieldMappings, fieldSet };
+    const datasetFields = uniqueList([
+      ...parseDatasetFields(state.input, 'displayFields'),
+      ...parseDatasetFields(state.input, 'lookupDisplayFields'),
+    ]);
+    const displayFields = uniqueList([
+      ...pickerFields,
+      ...datasetFields,
+      ...mappedFields,
+    ]);
+    const fieldSet = uniqueList([relatedKeyField, ...displayFields, '$id']);
+    return { fieldCode, relatedApp, relatedKeyField, pickerFields, fieldMappings, fieldSet, displayFields };
   }
   return null;
 }
@@ -364,7 +527,7 @@ function deriveLookupConfig(fieldCode) {
 function refreshLookupConfigs() {
   lookupStates.forEach((state) => {
     if (!state) return;
-    state.config = deriveLookupConfig(state.fieldCode);
+    state.config = deriveLookupConfig(state);
     if (!state.config) {
       state.labelLookup = new Map();
       return;
@@ -432,13 +595,13 @@ function normalizeLookupRecord(state, record) {
 
 function lookupLabelFromData(state, data) {
   if (!state || !data) return '';
-  if (!state.config?.pickerFields?.length) {
+  const fields = Array.isArray(state.config?.displayFields) ? state.config.displayFields : [];
+  if (!fields.length) {
     return data.key || '';
   }
-  const fields = state.config.pickerFields;
   const parts = fields
     .map((code) => data.values?.[code])
-    .filter((v, idx) => typeof v === 'string' && (idx === 0 || v !== data.values?.[state.config.relatedKeyField]));
+    .filter((v, idx) => typeof v === 'string' && v && (idx === 0 || v !== data.values?.[state.config.relatedKeyField]));
   const display = parts.filter(Boolean).join(' / ');
   if (!display) return data.key || '';
   return display.includes(data.key) ? display : `${data.key} / ${display}`;
@@ -495,7 +658,10 @@ function applyFormOptions() {
 
 async function fetchFormProperties() {
   try {
-    const res = await fetch(`${API_ENDPOINT}?type=form`);
+    const params = new URLSearchParams({ type: 'form' });
+    const bust = getFormCacheBust();
+    if (bust) params.set('cacheBust', bust);
+    const res = await fetch(`${API_ENDPOINT}?${params.toString()}`);
     if (!res.ok) throw new Error(await res.text());
     const json = await res.json();
     if (!json || typeof json !== 'object' || !json.properties) return;
@@ -514,6 +680,21 @@ async function fetchFormProperties() {
     }
   } catch (e) {
     console.warn('failed to fetch form properties', e);
+  }
+}
+
+async function fetchLookupFallbacks() {
+  try {
+    const params = new URLSearchParams({ type: 'lookup-config' });
+    const res = await fetch(`${API_ENDPOINT}?${params.toString()}`);
+    if (!res.ok) throw new Error(await res.text());
+    const json = await res.json();
+    if (!json || typeof json !== 'object') return;
+    const entries = json.lookups && typeof json.lookups === 'object' ? json.lookups : json;
+    applyLookupFallbacks(entries);
+    persistLookupFallbacks(entries);
+  } catch (e) {
+    console.warn('failed to fetch lookup config', e);
   }
 }
 
@@ -816,6 +997,14 @@ function createCardElement(item) {
   return card;
 }
 
+function showCompletionForm() {
+  if (completeForm) completeForm.classList.remove('hidden');
+  if (completePanel) {
+    completePanel.classList.remove('hidden');
+    completePanel.setAttribute('aria-hidden', 'false');
+  }
+}
+
 function renderActiveCards() {
   if (!activeCardsContainer) return;
   const list = loadOpenStarts();
@@ -838,7 +1027,7 @@ function renderActiveCards() {
     const found = list.find((item) => item.recordId === selectedStartId);
     if (found) {
       updateCompletionSummary(found);
-      if (completeForm) completeForm.classList.remove('hidden');
+      showCompletionForm();
     } else {
       hideCompletionForm();
     }
@@ -926,6 +1115,10 @@ function hideCompletionForm() {
   selectedStartId = null;
   if (completeForm) completeForm.classList.add('hidden');
   if (completionSummary) completionSummary.textContent = '作業中カードを選択してください';
+  if (completePanel) {
+    completePanel.classList.add('hidden');
+    completePanel.setAttribute('aria-hidden', 'true');
+  }
 }
 
 function updateCompletionSummary(info) {
@@ -964,12 +1157,16 @@ function selectStartForCompletion(recordId) {
   }
   selectedStartId = recordId;
   updateCompletionSummary(found);
-  if (completeForm) completeForm.classList.remove('hidden');
-  setDateTimeToNow($('endAt'));
+  showCompletionForm();
+  const endAtInput = $('endAt');
+  setDateTimeToNow(endAtInput);
   const qtyInput = $('qty');
   const downtimeInput = $('downtimeMin');
   if (qtyInput && !qtyInput.value) qtyInput.value = '0';
   if (downtimeInput && !downtimeInput.value) downtimeInput.value = '0';
+  if (endAtInput) {
+    setTimeout(() => endAtInput.focus(), 0);
+  }
   renderActiveCards();
 }
 
@@ -1058,11 +1255,41 @@ if (startPanel) {
   });
 }
 
+if (closeCompleteFormBtn) {
+  closeCompleteFormBtn.addEventListener('click', () => {
+    msg('');
+    hideCompletionForm();
+    renderActiveCards();
+  });
+}
+
+if (completePanel) {
+  completePanel.addEventListener('click', (event) => {
+    if (event.target === completePanel) {
+      msg('');
+      hideCompletionForm();
+      renderActiveCards();
+    }
+  });
+}
+
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && startPanel && !startPanel.classList.contains('hidden')) {
-    event.preventDefault();
+  if (event.key !== 'Escape') return;
+  let handled = false;
+  if (startPanel && !startPanel.classList.contains('hidden')) {
     hideStartForm({ manual: true });
+    handled = true;
   }
+  if (completePanel && !completePanel.classList.contains('hidden')) {
+    hideCompletionForm();
+    renderActiveCards();
+    handled = true;
+  }
+  if (handled) {
+    event.preventDefault();
+    msg('');
+  }
+});
 
 if (refreshActiveBtn) {
   refreshActiveBtn.addEventListener('click', () => {
@@ -1110,7 +1337,9 @@ if (equipmentInput) {
   });
 }
 
+loadLookupFallbacks();
 loadCachedFormProperties();
+refreshLookupConfigs();
 renderPlanSummary(null);
 renderActiveCards();
 showMainView();
@@ -1407,6 +1636,7 @@ async function flushQueue() {
 // --- 初期ロードでサーバ同期を試行 ---
 if (navigator.onLine) {
   refreshOpenStartsFromServer();
+  fetchLookupFallbacks();
   fetchFormProperties();
   flushQueue();
 }
@@ -1414,6 +1644,7 @@ if (navigator.onLine) {
 window.addEventListener('online', () => {
   flushQueue();
   refreshOpenStartsFromServer();
+  fetchLookupFallbacks();
   fetchFormProperties();
   if (planInput?.value) {
     applyPlanSelection(planInput.value.trim(), true);
@@ -1430,6 +1661,11 @@ document.addEventListener('visibilitychange', () => {
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').catch(() => {});
+  navigator.serviceWorker.addEventListener('message', (event) => {
+    if (event.data && event.data.type === 'SW_RELOAD') {
+      window.location.reload();
+    }
+  });
 }
 
 window.addEventListener('offline', () => {
