@@ -340,8 +340,19 @@ function persistFormProperties(full) {
   saveJson(FORM_META_KEY, full);
 }
 
-function deriveLookupConfig(fieldCode) {
-  if (!fieldCode || !formProperties || typeof formProperties !== 'object') return null;
+function parseDatasetFields(input, attrName) {
+  if (!input) return [];
+  const value = input.dataset?.[attrName];
+  if (!value) return [];
+  return value
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function deriveLookupConfig(state) {
+  if (!state?.fieldCode || !formProperties || typeof formProperties !== 'object') return null;
+  const fieldCode = state.fieldCode;
   for (const key of Object.keys(formProperties)) {
     const prop = formProperties[key];
     if (!prop || prop.type !== 'LOOKUP' || !prop.lookup) continue;
@@ -357,8 +368,17 @@ function deriveLookupConfig(fieldCode) {
       .filter((m) => m && typeof m.field === 'string' && typeof m.relatedField === 'string')
       .map((m) => ({ field: m.field, relatedField: m.relatedField }));
     const mappedFields = fieldMappings.map((m) => m.relatedField);
-    const fieldSet = uniqueList([relatedKeyField, ...pickerFields, ...mappedFields, '$id']);
-    return { fieldCode, relatedApp, relatedKeyField, pickerFields, fieldMappings, fieldSet };
+    const datasetFields = uniqueList([
+      ...parseDatasetFields(state.input, 'displayFields'),
+      ...parseDatasetFields(state.input, 'lookupDisplayFields'),
+    ]);
+    const displayFields = uniqueList([
+      ...pickerFields,
+      ...datasetFields,
+      ...mappedFields,
+    ]);
+    const fieldSet = uniqueList([relatedKeyField, ...displayFields, '$id']);
+    return { fieldCode, relatedApp, relatedKeyField, pickerFields, fieldMappings, fieldSet, displayFields };
   }
   return null;
 }
@@ -366,7 +386,7 @@ function deriveLookupConfig(fieldCode) {
 function refreshLookupConfigs() {
   lookupStates.forEach((state) => {
     if (!state) return;
-    state.config = deriveLookupConfig(state.fieldCode);
+    state.config = deriveLookupConfig(state);
     if (!state.config) {
       state.labelLookup = new Map();
       return;
@@ -434,13 +454,13 @@ function normalizeLookupRecord(state, record) {
 
 function lookupLabelFromData(state, data) {
   if (!state || !data) return '';
-  if (!state.config?.pickerFields?.length) {
+  const fields = Array.isArray(state.config?.displayFields) ? state.config.displayFields : [];
+  if (!fields.length) {
     return data.key || '';
   }
-  const fields = state.config.pickerFields;
   const parts = fields
     .map((code) => data.values?.[code])
-    .filter((v, idx) => typeof v === 'string' && (idx === 0 || v !== data.values?.[state.config.relatedKeyField]));
+    .filter((v, idx) => typeof v === 'string' && v && (idx === 0 || v !== data.values?.[state.config.relatedKeyField]));
   const display = parts.filter(Boolean).join(' / ');
   if (!display) return data.key || '';
   return display.includes(data.key) ? display : `${data.key} / ${display}`;
