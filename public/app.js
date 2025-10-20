@@ -49,12 +49,14 @@ const msg = (t, ok = false) => {
 
 const mainView = $('mainView');
 const startPanel = $('startPanel');
+const completePanel = $('completePanel');
 const startForm = $('startForm');
 const completeForm = $('completeForm');
 const activeCardsContainer = $('activeCards');
 const completionSummary = $('completionSummary');
 const openStartFormBtn = $('openStartForm');
 const closeStartFormBtn = $('closeStartForm');
+const closeCompleteFormBtn = $('closeCompleteForm');
 const refreshActiveBtn = $('refreshActive');
 const planSummary = $('planSummary');
 const planInput = $('planId');
@@ -74,6 +76,22 @@ const FORM_META_KEY = 'kintone-form-meta';
 const LOOKUP_CACHE_PREFIX = 'lookup-cache:';
 
 const getEntryMode = () => (currentView === 'start' ? 'start' : 'complete');
+
+function getFormCacheBust() {
+  try {
+    const key = 'form-cache-bust';
+    if (window.sessionStorage) {
+      const existing = window.sessionStorage.getItem(key);
+      if (existing) return existing;
+      const generated = String(Date.now());
+      window.sessionStorage.setItem(key, generated);
+      return generated;
+    }
+  } catch (err) {
+    console.warn('failed to access sessionStorage', err);
+  }
+  return String(Date.now());
+}
 
 function currentLocalDateTimeValue() {
   const now = new Date();
@@ -338,25 +356,55 @@ function persistFormProperties(full) {
   saveJson(FORM_META_KEY, full);
 }
 
-function deriveLookupConfig(fieldCode) {
-  if (!fieldCode || !formProperties || typeof formProperties !== 'object') return null;
+function parseDatasetFields(input, attrName) {
+  if (!input) return [];
+  const value = input.dataset?.[attrName];
+  if (!value) return [];
+  return value
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function deriveLookupConfig(state) {
+  if (!state?.fieldCode) return null;
+  if (!formProperties || typeof formProperties !== 'object') return null;
+  const fieldCode = state.fieldCode;
   for (const key of Object.keys(formProperties)) {
     const prop = formProperties[key];
-    if (!prop || prop.type !== 'LOOKUP' || !prop.lookup) continue;
+    if (!prop || !prop.lookup) continue;
     const mappings = Array.isArray(prop.lookup.fieldMappings) ? prop.lookup.fieldMappings : [];
     if (!mappings.some((m) => m?.field === fieldCode)) continue;
     const relatedApp = prop.lookup.relatedApp?.app;
     const relatedKeyField = prop.lookup.relatedKeyField;
     if (!relatedApp || !relatedKeyField) continue;
     const pickerFields = Array.isArray(prop.lookup.lookupPickerFields)
-      ? prop.lookup.lookupPickerFields.filter((v) => typeof v === 'string')
+      ? prop.lookup.lookupPickerFields
+        .map((entry) => {
+          if (typeof entry === 'string') return entry.trim();
+          if (entry && typeof entry === 'object') {
+            const maybeField = entry.field || entry.code || entry.fieldCode;
+            if (typeof maybeField === 'string') return maybeField.trim();
+          }
+          return '';
+        })
+        .filter(Boolean)
       : [];
     const fieldMappings = mappings
       .filter((m) => m && typeof m.field === 'string' && typeof m.relatedField === 'string')
       .map((m) => ({ field: m.field, relatedField: m.relatedField }));
     const mappedFields = fieldMappings.map((m) => m.relatedField);
-    const fieldSet = uniqueList([relatedKeyField, ...pickerFields, ...mappedFields, '$id']);
-    return { fieldCode, relatedApp, relatedKeyField, pickerFields, fieldMappings, fieldSet };
+    const datasetFields = uniqueList([
+      ...parseDatasetFields(state.input, 'displayFields'),
+      ...parseDatasetFields(state.input, 'lookupDisplayFields'),
+    ]);
+    const displayFields = uniqueList([
+      ...pickerFields,
+      ...datasetFields,
+      ...mappedFields,
+    ]);
+    const fieldSet = uniqueList([relatedKeyField, ...displayFields, '$id']);
+    return { fieldCode, relatedApp, relatedKeyField, pickerFields, fieldMappings, fieldSet, displayFields };
   }
   return null;
 }
@@ -364,7 +412,7 @@ function deriveLookupConfig(fieldCode) {
 function refreshLookupConfigs() {
   lookupStates.forEach((state) => {
     if (!state) return;
-    state.config = deriveLookupConfig(state.fieldCode);
+    state.config = deriveLookupConfig(state);
     if (!state.config) {
       state.labelLookup = new Map();
       return;
@@ -432,13 +480,13 @@ function normalizeLookupRecord(state, record) {
 
 function lookupLabelFromData(state, data) {
   if (!state || !data) return '';
-  if (!state.config?.pickerFields?.length) {
+  const fields = Array.isArray(state.config?.displayFields) ? state.config.displayFields : [];
+  if (!fields.length) {
     return data.key || '';
   }
-  const fields = state.config.pickerFields;
   const parts = fields
     .map((code) => data.values?.[code])
-    .filter((v, idx) => typeof v === 'string' && (idx === 0 || v !== data.values?.[state.config.relatedKeyField]));
+    .filter((v, idx) => typeof v === 'string' && v && (idx === 0 || v !== data.values?.[state.config.relatedKeyField]));
   const display = parts.filter(Boolean).join(' / ');
   if (!display) return data.key || '';
   return display.includes(data.key) ? display : `${data.key} / ${display}`;
@@ -495,7 +543,10 @@ function applyFormOptions() {
 
 async function fetchFormProperties() {
   try {
-    const res = await fetch(`${API_ENDPOINT}?type=form`);
+    const params = new URLSearchParams({ type: 'form' });
+    const bust = getFormCacheBust();
+    if (bust) params.set('cacheBust', bust);
+    const res = await fetch(`${API_ENDPOINT}?${params.toString()}`);
     if (!res.ok) throw new Error(await res.text());
     const json = await res.json();
     if (!json || typeof json !== 'object' || !json.properties) return;
@@ -816,6 +867,14 @@ function createCardElement(item) {
   return card;
 }
 
+function showCompletionForm() {
+  if (completeForm) completeForm.classList.remove('hidden');
+  if (completePanel) {
+    completePanel.classList.remove('hidden');
+    completePanel.setAttribute('aria-hidden', 'false');
+  }
+}
+
 function renderActiveCards() {
   if (!activeCardsContainer) return;
   const list = loadOpenStarts();
@@ -838,7 +897,7 @@ function renderActiveCards() {
     const found = list.find((item) => item.recordId === selectedStartId);
     if (found) {
       updateCompletionSummary(found);
-      if (completeForm) completeForm.classList.remove('hidden');
+      showCompletionForm();
     } else {
       hideCompletionForm();
     }
@@ -926,6 +985,10 @@ function hideCompletionForm() {
   selectedStartId = null;
   if (completeForm) completeForm.classList.add('hidden');
   if (completionSummary) completionSummary.textContent = '作業中カードを選択してください';
+  if (completePanel) {
+    completePanel.classList.add('hidden');
+    completePanel.setAttribute('aria-hidden', 'true');
+  }
 }
 
 function updateCompletionSummary(info) {
@@ -964,12 +1027,16 @@ function selectStartForCompletion(recordId) {
   }
   selectedStartId = recordId;
   updateCompletionSummary(found);
-  if (completeForm) completeForm.classList.remove('hidden');
-  setDateTimeToNow($('endAt'));
+  showCompletionForm();
+  const endAtInput = $('endAt');
+  setDateTimeToNow(endAtInput);
   const qtyInput = $('qty');
   const downtimeInput = $('downtimeMin');
   if (qtyInput && !qtyInput.value) qtyInput.value = '0';
   if (downtimeInput && !downtimeInput.value) downtimeInput.value = '0';
+  if (endAtInput) {
+    setTimeout(() => endAtInput.focus(), 0);
+  }
   renderActiveCards();
 }
 
@@ -1058,11 +1125,41 @@ if (startPanel) {
   });
 }
 
+if (closeCompleteFormBtn) {
+  closeCompleteFormBtn.addEventListener('click', () => {
+    msg('');
+    hideCompletionForm();
+    renderActiveCards();
+  });
+}
+
+if (completePanel) {
+  completePanel.addEventListener('click', (event) => {
+    if (event.target === completePanel) {
+      msg('');
+      hideCompletionForm();
+      renderActiveCards();
+    }
+  });
+}
+
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && startPanel && !startPanel.classList.contains('hidden')) {
-    event.preventDefault();
+  if (event.key !== 'Escape') return;
+  let handled = false;
+  if (startPanel && !startPanel.classList.contains('hidden')) {
     hideStartForm({ manual: true });
+    handled = true;
   }
+  if (completePanel && !completePanel.classList.contains('hidden')) {
+    hideCompletionForm();
+    renderActiveCards();
+    handled = true;
+  }
+  if (handled) {
+    event.preventDefault();
+    msg('');
+  }
+});
 
 if (refreshActiveBtn) {
   refreshActiveBtn.addEventListener('click', () => {
@@ -1111,6 +1208,7 @@ if (equipmentInput) {
 }
 
 loadCachedFormProperties();
+refreshLookupConfigs();
 renderPlanSummary(null);
 renderActiveCards();
 showMainView();
@@ -1429,7 +1527,24 @@ document.addEventListener('visibilitychange', () => {
 });
 
 if ('serviceWorker' in navigator) {
+  let swRefreshing = false;
+  const triggerReload = () => {
+    if (swRefreshing) return;
+    swRefreshing = true;
+    window.location.reload();
+  };
   navigator.serviceWorker.register('/sw.js').catch(() => {});
+  navigator.serviceWorker.addEventListener('message', (event) => {
+    if (event.data && event.data.type === 'SW_RELOAD') {
+      triggerReload();
+    }
+  });
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    triggerReload();
+  });
+  navigator.serviceWorker.ready
+    .then((registration) => registration.update().catch(() => {}))
+    .catch(() => {});
 }
 
 window.addEventListener('offline', () => {
