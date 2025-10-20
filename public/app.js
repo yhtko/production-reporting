@@ -1435,5 +1435,5 @@ if ('serviceWorker' in navigator) {
 window.addEventListener('offline', () => {
   msg('オフラインです。入力はキューに保存されます。');
 });
-}
+});
 })();
