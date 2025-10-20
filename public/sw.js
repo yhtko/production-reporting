@@ -1,11 +1,22 @@
-const CACHE = 'pr-cache-v1';
+const CACHE = 'pr-cache-v2';
 const ASSETS = ['/', '/index.html', '/app.js', '/manifest.webmanifest'];
 
-self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)));
+self.addEventListener('install', (event) => {
+  event.waitUntil(
+    caches.open(CACHE).then((cache) => cache.addAll(ASSETS))
+  );
+  self.skipWaiting();
 });
-self.addEventListener('activate', (e) => {
-  e.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(k=>k!==CACHE).map(k=>caches.delete(k)))));
+
+self.addEventListener('activate', (event) => {
+  event.waitUntil(
+    caches
+      .keys()
+      .then((keys) =>
+        Promise.all(keys.filter((key) => key !== CACHE).map((key) => caches.delete(key)))
+      )
+  );
+  self.clients.claim();
 });
 self.addEventListener('fetch', (e) => {
   const { request } = e;
@@ -14,6 +25,22 @@ self.addEventListener('fetch', (e) => {
   const url = new URL(request.url);
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return;
   if (url.origin !== self.location.origin) return;
+
+  if (request.mode === 'navigate' || request.headers.get('accept')?.includes('text/html')) {
+    e.respondWith((async () => {
+      try {
+        const networkResponse = await fetch(request);
+        const cache = await caches.open(CACHE);
+        cache.put(request, networkResponse.clone());
+        return networkResponse;
+      } catch (error) {
+        const cached = await caches.match(request);
+        if (cached) return cached;
+        return caches.match('/index.html');
+      }
+    })());
+    return;
+  }
 
   e.respondWith(
     caches.match(request).then(cached => {
