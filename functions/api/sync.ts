@@ -7,6 +7,7 @@ export interface Env {
   KINTONE_TOKEN_LOG_UPDATE?: string; // 実績アプリのAPIトークン（更新権限）
   KINTONE_TOKEN_LUP?: string; // 参照元(lookup)アプリのAPIトークン（閲覧権限）
   KINTONE_FORM_SCHEMA?: string; // form APIが使えない場合のフォールバックJSON
+  KINTONE_LOOKUP_CONFIG?: string; // ルックアップ設定のフォールバックJSON
 }
 function safeJson(s: string) {
   try { return JSON.parse(s); } catch { return s; }
@@ -204,6 +205,26 @@ function unique<T>(arr: Iterable<T>): T[] {
     if (seen.has(item)) continue;
     seen.add(item);
     result.push(item);
+  }
+  return result;
+}
+
+function normalizeFieldList(list: unknown): string[] {
+  if (!Array.isArray(list)) return [];
+  const result: string[] = [];
+  for (const entry of list) {
+    if (typeof entry === "string") {
+      const trimmed = entry.trim();
+      if (trimmed) result.push(trimmed);
+      continue;
+    }
+    if (entry && typeof entry === "object") {
+      const maybeField = (entry as any).field ?? (entry as any).code ?? (entry as any).fieldCode;
+      if (typeof maybeField === "string") {
+        const trimmed = maybeField.trim();
+        if (trimmed) result.push(trimmed);
+      }
+    }
   }
   return result;
 }
