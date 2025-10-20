@@ -47,14 +47,14 @@ const msg = (t, ok = false) => {
   msgContainer.className = t ? (ok ? 'ok' : 'err') : '';
 };
 
-const startView = $('startView');
-const activeView = $('activeView');
+const mainView = $('mainView');
+const startPanel = $('startPanel');
 const startForm = $('startForm');
 const completeForm = $('completeForm');
 const activeCardsContainer = $('activeCards');
 const completionSummary = $('completionSummary');
-const toActiveViewBtn = $('toActiveView');
-const toStartViewBtn = $('toStartView');
+const openStartFormBtn = $('openStartForm');
+const closeStartFormBtn = $('closeStartForm');
 const refreshActiveBtn = $('refreshActive');
 const planSummary = $('planSummary');
 const planInput = $('planId');
@@ -64,9 +64,10 @@ const operatorOptionsList = $('operatorOptions');
 const equipmentInput = $('equipment');
 const equipmentOptionsList = $('equipmentOptions');
 
-let currentView = 'start';
+let currentView = 'main';
 let selectedStartId = null;
 let manualViewPreference = null;
+let startFormAutoOpen = false;
 
 const OPEN_STARTS_KEY = 'open-start-records';
 const FORM_META_KEY = 'kintone-form-meta';
@@ -921,7 +922,6 @@ async function refreshOpenStartsFromServer() {
   }
 }
 
-function syncPlanIdWithSelection() {
 function hideCompletionForm() {
   selectedStartId = null;
   if (completeForm) completeForm.classList.add('hidden');
@@ -973,59 +973,96 @@ function selectStartForCompletion(recordId) {
   renderActiveCards();
 }
 
-function showStartView(options = {}) {
+function showMainView(options = {}) {
+  const { manual = false } = options;
+  currentView = 'main';
+  startFormAutoOpen = false;
+  if (manual) {
+    manualViewPreference = 'main';
+  } else if (manualViewPreference === 'main') {
+    manualViewPreference = null;
+  }
+  if (startPanel) {
+    startPanel.classList.add('hidden');
+    startPanel.setAttribute('aria-hidden', 'true');
+  }
+  if (mainView) {
+    mainView.classList.remove('hidden');
+  }
+  ensureDateTimeValue($('endAt'));
+}
+
+function showStartForm(options = {}) {
   const { manual = false } = options;
   currentView = 'start';
-  manualViewPreference = manual ? 'start' : null;
-  if (startView) startView.classList.remove('hidden');
-  if (activeView) activeView.classList.add('hidden');
-  hideCompletionForm();
+  startFormAutoOpen = !manual;
+  if (manual) {
+    manualViewPreference = 'start';
+  } else if (manualViewPreference === 'start') {
+    manualViewPreference = null;
+  }
+  if (startPanel) {
+    startPanel.classList.remove('hidden');
+    startPanel.setAttribute('aria-hidden', 'false');
+  }
+  if (!manual) {
+    hideCompletionForm();
+  }
   ensureDateTimeValue($('startAt'));
   if (planInput) {
     planInput.removeAttribute('readonly');
     applyPlanSelection(planInput.value.trim(), false);
+    setTimeout(() => planInput.focus(), 0);
   }
-}
-
-function showActiveView(options = {}) {
-  const { manual = false } = options;
-  currentView = 'complete';
-  manualViewPreference = manual ? 'complete' : null;
-  if (startView) startView.classList.add('hidden');
-  if (activeView) activeView.classList.remove('hidden');
-  if (planInput) {
-    planInput.setAttribute('readonly', 'readonly');
-  }
-  renderActiveCards();
-  ensureDateTimeValue($('endAt'));
 }
 
 function evaluateAutoView() {
   const list = loadOpenStarts();
-  if (list.length) {
-    if (currentView !== 'complete' && manualViewPreference !== 'start') {
-      showActiveView();
+  if (!list.length) {
+    if (currentView !== 'start' && manualViewPreference !== 'main') {
+      showStartForm({ manual: false });
     }
-  } else if (currentView !== 'start' && manualViewPreference !== 'complete') {
-    showStartView();
+  } else {
+    if (currentView === 'start' && startFormAutoOpen) {
+      showMainView();
+    }
+    if (manualViewPreference === 'main') {
+      manualViewPreference = null;
+    }
   }
 }
 
-if (toActiveViewBtn) {
-  toActiveViewBtn.addEventListener('click', () => {
-    showActiveView({ manual: true });
-    if (navigator.onLine) {
-      refreshOpenStartsFromServer();
+function hideStartForm(options = {}) {
+  showMainView(options);
+}
+
+if (openStartFormBtn) {
+  openStartFormBtn.addEventListener('click', () => {
+    msg('');
+    showStartForm({ manual: true });
+  });
+}
+
+if (closeStartFormBtn) {
+  closeStartFormBtn.addEventListener('click', () => {
+    msg('');
+    hideStartForm({ manual: true });
+  });
+}
+
+if (startPanel) {
+  startPanel.addEventListener('click', (event) => {
+    if (event.target === startPanel) {
+      hideStartForm({ manual: true });
     }
   });
 }
 
-if (toStartViewBtn) {
-  toStartViewBtn.addEventListener('click', () => {
-    showStartView({ manual: true });
-    msg('');
-  });
-}
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && startPanel && !startPanel.classList.contains('hidden')) {
+    event.preventDefault();
+    hideStartForm({ manual: true });
+  }
 
 if (refreshActiveBtn) {
   refreshActiveBtn.addEventListener('click', () => {
@@ -1076,7 +1113,7 @@ if (equipmentInput) {
 loadCachedFormProperties();
 renderPlanSummary(null);
 renderActiveCards();
-showStartView();
+showMainView();
 evaluateAutoView();
 ensureDateTimeValue($('endAt'));
 
@@ -1209,7 +1246,7 @@ if (startForm) {
         if (operatorInput) operatorInput.value = '';
         if (equipmentInput) equipmentInput.value = '';
         hideCompletionForm();
-        showActiveView();
+        showMainView();
         if (planId) applyPlanSelection(planId, true);
       }
     } catch (err) {
@@ -1305,6 +1342,7 @@ if (completeForm) {
         if (qtyInput) qtyInput.value = '0';
         if (downtimeInput) downtimeInput.value = '0';
         hideCompletionForm();
+        showMainView();
         renderActiveCards();
       }
     } catch (err) {
@@ -1364,7 +1402,7 @@ async function flushQueue() {
       });
     }
   }
-});
+}
 
 // --- 初期ロードでサーバ同期を試行 ---
 if (navigator.onLine) {
@@ -1389,85 +1427,6 @@ document.addEventListener('visibilitychange', () => {
     refreshOpenStartsFromServer();
   }
 });
-
-// --- 初期ロードでサーバ同期を試行 ---
-if (navigator.onLine) {
-  refreshOpenStartsFromServer();
-  fetchFormProperties();
-  flushQueue();
-}
-
-window.addEventListener('online', () => {
-  flushQueue();
-  refreshOpenStartsFromServer();
-  fetchFormProperties();
-  if (planInput?.value) {
-    applyPlanSelection(planInput.value.trim(), true);
-  }
-  scheduleOpenStartHydration();
-});
-
-document.addEventListener('visibilitychange', () => {
-  if (navigator.onLine && !document.hidden) {
-    flushQueue();
-    refreshOpenStartsFromServer();
-  }
-});
-
-// --- 初期ロードでサーバ同期を試行 ---
-if (navigator.onLine) {
-  refreshOpenStartsFromServer();
-  fetchFormProperties();
-  flushQueue();
-}
-
-window.addEventListener('online', () => {
-  flushQueue();
-  refreshOpenStartsFromServer();
-  fetchFormProperties();
-  if (planInput?.value) {
-    applyPlanSelection(planInput.value.trim(), true);
-  }
-  scheduleOpenStartHydration();
-});
-
-document.addEventListener('visibilitychange', () => {
-  if (navigator.onLine && !document.hidden) {
-    flushQueue();
-    refreshOpenStartsFromServer();
-  }
-});
-
-// --- 初期ロードでサーバ同期を試行 ---
-if (navigator.onLine) {
-  refreshOpenStartsFromServer();
-  fetchFormProperties();
-  flushQueue();
-}
-
-window.addEventListener('online', () => {
-  flushQueue();
-  refreshOpenStartsFromServer();
-  fetchFormProperties();
-  if (planInput?.value) {
-    applyPlanSelection(planInput.value.trim(), true);
-  }
-  scheduleOpenStartHydration();
-});
-
-document.addEventListener('visibilitychange', () => {
-  if (navigator.onLine && !document.hidden) {
-    flushQueue();
-    refreshOpenStartsFromServer();
-  }
-});
-
-// --- 初期ロードでサーバ同期を試行 ---
-if (navigator.onLine) {
-  refreshOpenStartsFromServer();
-  fetchFormProperties();
-  flushQueue();
-}
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').catch(() => {});
