@@ -371,7 +371,7 @@ function deriveLookupConfig(state) {
   const fieldCode = state.fieldCode;
   for (const key of Object.keys(formProperties)) {
     const prop = formProperties[key];
-    if (!prop || prop.type !== 'LOOKUP' || !prop.lookup) continue;
+    if (!prop || !prop.lookup) continue;
     const mappings = Array.isArray(prop.lookup.fieldMappings) ? prop.lookup.fieldMappings : [];
     if (!mappings.some((m) => m?.field === fieldCode)) continue;
     const relatedApp = prop.lookup.relatedApp?.app;

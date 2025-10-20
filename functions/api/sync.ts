@@ -238,7 +238,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     }
 
     const lookupEntry = Object.values(properties).find((prop: any) => {
-      if (!prop || prop.type !== "LOOKUP") return false;
+      if (!prop || !prop.lookup) return false;
       const mappings = Array.isArray(prop.lookup?.fieldMappings) ? prop.lookup.fieldMappings : [];
       return mappings.some((m: any) => m?.field === planFieldCode);
     });
