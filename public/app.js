@@ -49,12 +49,14 @@ const msg = (t, ok = false) => {
 
 const mainView = $('mainView');
 const startPanel = $('startPanel');
+const completePanel = $('completePanel');
 const startForm = $('startForm');
 const completeForm = $('completeForm');
 const activeCardsContainer = $('activeCards');
 const completionSummary = $('completionSummary');
 const openStartFormBtn = $('openStartForm');
 const closeStartFormBtn = $('closeStartForm');
+const closeCompleteFormBtn = $('closeCompleteForm');
 const refreshActiveBtn = $('refreshActive');
 const planSummary = $('planSummary');
 const planInput = $('planId');
@@ -816,6 +818,14 @@ function createCardElement(item) {
   return card;
 }
 
+function showCompletionForm() {
+  if (completeForm) completeForm.classList.remove('hidden');
+  if (completePanel) {
+    completePanel.classList.remove('hidden');
+    completePanel.setAttribute('aria-hidden', 'false');
+  }
+}
+
 function renderActiveCards() {
   if (!activeCardsContainer) return;
   const list = loadOpenStarts();
@@ -838,7 +848,7 @@ function renderActiveCards() {
     const found = list.find((item) => item.recordId === selectedStartId);
     if (found) {
       updateCompletionSummary(found);
-      if (completeForm) completeForm.classList.remove('hidden');
+      showCompletionForm();
     } else {
       hideCompletionForm();
     }
@@ -926,6 +936,10 @@ function hideCompletionForm() {
   selectedStartId = null;
   if (completeForm) completeForm.classList.add('hidden');
   if (completionSummary) completionSummary.textContent = '作業中カードを選択してください';
+  if (completePanel) {
+    completePanel.classList.add('hidden');
+    completePanel.setAttribute('aria-hidden', 'true');
+  }
 }
 
 function updateCompletionSummary(info) {
@@ -964,12 +978,16 @@ function selectStartForCompletion(recordId) {
   }
   selectedStartId = recordId;
   updateCompletionSummary(found);
-  if (completeForm) completeForm.classList.remove('hidden');
-  setDateTimeToNow($('endAt'));
+  showCompletionForm();
+  const endAtInput = $('endAt');
+  setDateTimeToNow(endAtInput);
   const qtyInput = $('qty');
   const downtimeInput = $('downtimeMin');
   if (qtyInput && !qtyInput.value) qtyInput.value = '0';
   if (downtimeInput && !downtimeInput.value) downtimeInput.value = '0';
+  if (endAtInput) {
+    setTimeout(() => endAtInput.focus(), 0);
+  }
   renderActiveCards();
 }
 
@@ -1058,10 +1076,39 @@ if (startPanel) {
   });
 }
 
+if (closeCompleteFormBtn) {
+  closeCompleteFormBtn.addEventListener('click', () => {
+    msg('');
+    hideCompletionForm();
+    renderActiveCards();
+  });
+}
+
+if (completePanel) {
+  completePanel.addEventListener('click', (event) => {
+    if (event.target === completePanel) {
+      msg('');
+      hideCompletionForm();
+      renderActiveCards();
+    }
+  });
+}
+
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && startPanel && !startPanel.classList.contains('hidden')) {
-    event.preventDefault();
+  if (event.key !== 'Escape') return;
+  let handled = false;
+  if (startPanel && !startPanel.classList.contains('hidden')) {
     hideStartForm({ manual: true });
+    handled = true;
+  }
+  if (completePanel && !completePanel.classList.contains('hidden')) {
+    hideCompletionForm();
+    renderActiveCards();
+    handled = true;
+  }
+  if (handled) {
+    event.preventDefault();
+    msg('');
   }
 });
 
