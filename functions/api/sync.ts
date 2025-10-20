@@ -68,6 +68,8 @@ type FormProperties = Record<string, any> & {
 };
 
 let cachedFormDefinition: FormProperties | null = null;
+let cachedFormFetchedAt = 0;
+const FORM_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 function loadStaticFormDefinition(env: Env): FormProperties | null {
   const raw = env.KINTONE_FORM_SCHEMA;
@@ -83,8 +85,9 @@ function loadStaticFormDefinition(env: Env): FormProperties | null {
   return null;
 }
 
-async function fetchFormDefinition(context: RequestContext): Promise<FormProperties> {
-  if (cachedFormDefinition) {
+async function fetchFormDefinition(context: RequestContext, forceRefresh = false): Promise<FormProperties> {
+  const now = Date.now();
+  if (!forceRefresh && cachedFormDefinition && now - cachedFormFetchedAt < FORM_CACHE_TTL_MS) {
     return cachedFormDefinition;
   }
   const endpoint = `${context.env.KINTONE_BASE}/k/v1/app/form/fields.json?app=${encodeURIComponent(context.env.KINTONE_LOG_APP)}`;
@@ -99,6 +102,7 @@ async function fetchFormDefinition(context: RequestContext): Promise<FormPropert
         fallback.warning = { message: "returned static form schema" };
       }
       cachedFormDefinition = fallback;
+      cachedFormFetchedAt = now;
       return fallback;
     }
     if (
@@ -111,6 +115,7 @@ async function fetchFormDefinition(context: RequestContext): Promise<FormPropert
         properties: {},
         warning: { message: "form API unavailable for provided token" },
       };
+      cachedFormFetchedAt = now;
       return cachedFormDefinition;
     }
     throw new Response(JSON.stringify({
@@ -123,6 +128,7 @@ async function fetchFormDefinition(context: RequestContext): Promise<FormPropert
     throw new Response(JSON.stringify({ error: "unexpected form definition" }), { status: 500, headers: JSON_CORS_HEADERS });
   }
   cachedFormDefinition = json as FormProperties;
+  cachedFormFetchedAt = now;
   return cachedFormDefinition;
 }
 
@@ -157,6 +163,26 @@ function unique<T>(arr: Iterable<T>): T[] {
   return result;
 }
 
+function normalizeFieldList(list: unknown): string[] {
+  if (!Array.isArray(list)) return [];
+  const result: string[] = [];
+  for (const entry of list) {
+    if (typeof entry === "string") {
+      const trimmed = entry.trim();
+      if (trimmed) result.push(trimmed);
+      continue;
+    }
+    if (entry && typeof entry === "object") {
+      const maybeField = (entry as any).field ?? (entry as any).code ?? (entry as any).fieldCode;
+      if (typeof maybeField === "string") {
+        const trimmed = maybeField.trim();
+        if (trimmed) result.push(trimmed);
+      }
+    }
+  }
+  return result;
+}
+
 export const onRequestGet: PagesFunction<Env> = async (context) => {
   try {
     const url = new URL(context.request.url);
@@ -165,9 +191,11 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       return new Response(JSON.stringify({ error: "missing type" }), { status: 400, headers: JSON_CORS_HEADERS });
     }
 
+    const forceRefresh = url.searchParams.has("cacheBust");
+
     if (type === "form") {
       try {
-        const body = await fetchFormDefinition(context);
+        const body = await fetchFormDefinition(context, forceRefresh);
         return new Response(JSON.stringify(body), { status: 200, headers: JSON_CORS_HEADERS });
       } catch (err) {
         if (err instanceof Response) return err;
@@ -200,7 +228,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       return new Response(JSON.stringify({ records: simplified }), { status: 200, headers: JSON_CORS_HEADERS });
     }
 
-    const formDef = await fetchFormDefinition(context);
+    const formDef = await fetchFormDefinition(context, forceRefresh);
     const properties = formDef.properties as Record<string, any>;
 
     const planFieldCode = url.searchParams.get("field") ?? "";
@@ -226,7 +254,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       return new Response(JSON.stringify({ error: "lookup definition incomplete" }), { status: 500, headers: JSON_CORS_HEADERS });
     }
 
-    const pickerFields: string[] = Array.isArray(lookup?.lookupPickerFields) ? lookup.lookupPickerFields.filter((v: any) => typeof v === "string") : [];
+    const pickerFields: string[] = normalizeFieldList(lookup?.lookupPickerFields);
     const mappingFields: string[] = Array.isArray(lookup?.fieldMappings) ? lookup.fieldMappings.map((m: any) => m?.relatedField).filter((v: any) => typeof v === "string") : [];
     const fieldSet = unique([relatedKeyField, ...pickerFields, ...mappingFields]);
 
