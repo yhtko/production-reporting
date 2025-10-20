@@ -1661,6 +1661,11 @@ document.addEventListener('visibilitychange', () => {
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').catch(() => {});
+  navigator.serviceWorker.addEventListener('message', (event) => {
+    if (event.data && event.data.type === 'SW_RELOAD') {
+      window.location.reload();
+    }
+  });
 }
 
 window.addEventListener('offline', () => {
