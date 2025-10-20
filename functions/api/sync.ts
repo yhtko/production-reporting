@@ -68,6 +68,53 @@ type FormProperties = Record<string, any> & {
 };
 
 let cachedFormDefinition: FormProperties | null = null;
+let cachedFormFetchedAt = 0;
+const FORM_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+type FieldMapping = { field: string; relatedField: string };
+type ResolvedLookupConfig = {
+  fieldCode: string;
+  relatedApp: string;
+  relatedKeyField: string;
+  pickerFields: string[];
+  displayFields: string[];
+  fieldMappings: FieldMapping[];
+  fieldSet: string[];
+};
+
+function normalizeFieldList(list: unknown): string[] {
+  if (!Array.isArray(list)) return [];
+  const result: string[] = [];
+  for (const entry of list) {
+    if (typeof entry === "string") {
+      const trimmed = entry.trim();
+      if (trimmed) result.push(trimmed);
+      continue;
+    }
+    if (entry && typeof entry === "object") {
+      const maybeField = (entry as any).field ?? (entry as any).code ?? (entry as any).fieldCode;
+      if (typeof maybeField === "string") {
+        const trimmed = maybeField.trim();
+        if (trimmed) result.push(trimmed);
+      }
+    }
+  }
+  return result;
+}
+
+function normalizeMappings(list: unknown): FieldMapping[] {
+  if (!Array.isArray(list)) return [];
+  const result: FieldMapping[] = [];
+  for (const entry of list) {
+    if (!entry || typeof entry !== "object") continue;
+    const field = typeof (entry as any).field === "string" ? (entry as any).field.trim() : "";
+    const relatedField = typeof (entry as any).relatedField === "string" ? (entry as any).relatedField.trim() : "";
+    if (field && relatedField) {
+      result.push({ field, relatedField });
+    }
+  }
+  return result;
+}
 
 function loadStaticFormDefinition(env: Env): FormProperties | null {
   const raw = env.KINTONE_FORM_SCHEMA;
@@ -83,8 +130,9 @@ function loadStaticFormDefinition(env: Env): FormProperties | null {
   return null;
 }
 
-async function fetchFormDefinition(context: RequestContext): Promise<FormProperties> {
-  if (cachedFormDefinition) {
+async function fetchFormDefinition(context: RequestContext, forceRefresh = false): Promise<FormProperties> {
+  const now = Date.now();
+  if (!forceRefresh && cachedFormDefinition && now - cachedFormFetchedAt < FORM_CACHE_TTL_MS) {
     return cachedFormDefinition;
   }
   const endpoint = `${context.env.KINTONE_BASE}/k/v1/app/form/fields.json?app=${encodeURIComponent(context.env.KINTONE_LOG_APP)}`;
@@ -99,6 +147,7 @@ async function fetchFormDefinition(context: RequestContext): Promise<FormPropert
         fallback.warning = { message: "returned static form schema" };
       }
       cachedFormDefinition = fallback;
+      cachedFormFetchedAt = now;
       return fallback;
     }
     if (
@@ -111,6 +160,7 @@ async function fetchFormDefinition(context: RequestContext): Promise<FormPropert
         properties: {},
         warning: { message: "form API unavailable for provided token" },
       };
+      cachedFormFetchedAt = now;
       return cachedFormDefinition;
     }
     throw new Response(JSON.stringify({
@@ -123,6 +173,7 @@ async function fetchFormDefinition(context: RequestContext): Promise<FormPropert
     throw new Response(JSON.stringify({ error: "unexpected form definition" }), { status: 500, headers: JSON_CORS_HEADERS });
   }
   cachedFormDefinition = json as FormProperties;
+  cachedFormFetchedAt = now;
   return cachedFormDefinition;
 }
 
@@ -165,9 +216,11 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       return new Response(JSON.stringify({ error: "missing type" }), { status: 400, headers: JSON_CORS_HEADERS });
     }
 
+    const forceRefresh = url.searchParams.has("cacheBust");
+
     if (type === "form") {
       try {
-        const body = await fetchFormDefinition(context);
+        const body = await fetchFormDefinition(context, forceRefresh);
         return new Response(JSON.stringify(body), { status: 200, headers: JSON_CORS_HEADERS });
       } catch (err) {
         if (err instanceof Response) return err;
@@ -200,7 +253,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       return new Response(JSON.stringify({ records: simplified }), { status: 200, headers: JSON_CORS_HEADERS });
     }
 
-    const formDef = await fetchFormDefinition(context);
+    const formDef = await fetchFormDefinition(context, forceRefresh);
     const properties = formDef.properties as Record<string, any>;
 
     const planFieldCode = url.searchParams.get("field") ?? "";
@@ -210,25 +263,42 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     }
 
     const lookupEntry = Object.values(properties).find((prop: any) => {
-      if (!prop || prop.type !== "LOOKUP") return false;
+      if (!prop || !prop.lookup) return false;
       const mappings = Array.isArray(prop.lookup?.fieldMappings) ? prop.lookup.fieldMappings : [];
       return mappings.some((m: any) => m?.field === planFieldCode);
     });
 
-    if (!lookupEntry) {
+    let resolved: ResolvedLookupConfig | null = null;
+    if (lookupEntry && lookupEntry.lookup) {
+      const lookup = lookupEntry.lookup;
+      const relatedApp = lookup?.relatedApp?.app;
+      const relatedKeyField = lookup?.relatedKeyField;
+      if (relatedApp && relatedKeyField) {
+        const pickerFields: string[] = normalizeFieldList(lookup?.lookupPickerFields);
+        const fieldMappings = normalizeMappings(lookup?.fieldMappings);
+        const mappedFields = fieldMappings.map((m) => m.relatedField);
+        const displayFields = unique([
+          ...pickerFields,
+          ...mappedFields,
+        ]);
+        const fieldSet = unique([relatedKeyField, ...displayFields, "$id"]);
+        resolved = {
+          fieldCode: planFieldCode,
+          relatedApp,
+          relatedKeyField,
+          pickerFields,
+          displayFields,
+          fieldMappings,
+          fieldSet,
+        };
+      }
+    }
+
+    if (!resolved) {
       return new Response(JSON.stringify({ error: "lookup not configured for field" }), { status: 404, headers: JSON_CORS_HEADERS });
     }
 
-    const lookup = lookupEntry.lookup;
-    const relatedApp = lookup?.relatedApp?.app;
-    const relatedKeyField = lookup?.relatedKeyField;
-    if (!relatedApp || !relatedKeyField) {
-      return new Response(JSON.stringify({ error: "lookup definition incomplete" }), { status: 500, headers: JSON_CORS_HEADERS });
-    }
-
-    const pickerFields: string[] = Array.isArray(lookup?.lookupPickerFields) ? lookup.lookupPickerFields.filter((v: any) => typeof v === "string") : [];
-    const mappingFields: string[] = Array.isArray(lookup?.fieldMappings) ? lookup.fieldMappings.map((m: any) => m?.relatedField).filter((v: any) => typeof v === "string") : [];
-    const fieldSet = unique([relatedKeyField, ...pickerFields, ...mappingFields]);
+    const { relatedApp, relatedKeyField, pickerFields, fieldSet } = resolved;
 
     if (type === "lookup-record") {
       const value = url.searchParams.get("value") ?? "";
