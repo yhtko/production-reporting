@@ -279,6 +279,26 @@ function unique<T>(arr: Iterable<T>): T[] {
   return result;
 }
 
+function normalizeFieldList(list: unknown): string[] {
+  if (!Array.isArray(list)) return [];
+  const result: string[] = [];
+  for (const entry of list) {
+    if (typeof entry === "string") {
+      const trimmed = entry.trim();
+      if (trimmed) result.push(trimmed);
+      continue;
+    }
+    if (entry && typeof entry === "object") {
+      const maybeField = (entry as any).field ?? (entry as any).code ?? (entry as any).fieldCode;
+      if (typeof maybeField === "string") {
+        const trimmed = maybeField.trim();
+        if (trimmed) result.push(trimmed);
+      }
+    }
+  }
+  return result;
+}
+
 export const onRequestGet: PagesFunction<Env> = async (context) => {
   try {
     const url = new URL(context.request.url);
