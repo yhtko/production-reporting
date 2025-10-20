@@ -11,4 +11,3 @@ KINTONE_PLAN_APP = "456" # 計画（任意）
 # シークレットは wrangler secret put で登録
 # KINTONE_TOKEN_LOG
 # KINTONE_TOKEN_PLAN
-# Optional: set KINTONE_LOOKUP_CONFIG (JSON) to describe lookup fallbacks when the form API is unavailable

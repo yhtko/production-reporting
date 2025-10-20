@@ -83,9 +83,6 @@ type ResolvedLookupConfig = {
   fieldSet: string[];
 };
 
-let cachedLookupConfig: Record<string, ResolvedLookupConfig> | null = null;
-let cachedLookupConfigSource = "";
-
 function normalizeFieldList(list: unknown): string[] {
   if (!Array.isArray(list)) return [];
   const result: string[] = [];
@@ -118,73 +115,6 @@ function normalizeMappings(list: unknown): FieldMapping[] {
     }
   }
   return result;
-}
-
-function loadStaticLookupConfig(env: Env): Record<string, ResolvedLookupConfig> {
-  if (cachedLookupConfig && cachedLookupConfigSource === env.KINTONE_LOOKUP_CONFIG) {
-    return cachedLookupConfig;
-  }
-  const raw = env.KINTONE_LOOKUP_CONFIG;
-  if (!raw) {
-    cachedLookupConfig = {};
-    cachedLookupConfigSource = "";
-    return cachedLookupConfig;
-  }
-  try {
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") {
-      cachedLookupConfig = {};
-      cachedLookupConfigSource = raw;
-      return cachedLookupConfig;
-    }
-    const result: Record<string, ResolvedLookupConfig> = {};
-    Object.entries(parsed as Record<string, unknown>).forEach(([fieldCode, value]) => {
-      if (!value || typeof value !== "object") return;
-      const relatedAppRaw = (value as any).relatedApp ?? (value as any).app;
-      const relatedApp = typeof relatedAppRaw === "string" ? relatedAppRaw.trim() :
-        (relatedAppRaw && typeof relatedAppRaw === "object" && typeof (relatedAppRaw as any).app === "string")
-          ? String((relatedAppRaw as any).app).trim()
-          : "";
-      const relatedKeyFieldRaw = (value as any).relatedKeyField ?? (value as any).key;
-      const relatedKeyField = typeof relatedKeyFieldRaw === "string" ? relatedKeyFieldRaw.trim() : "";
-      if (!relatedApp || !relatedKeyField) return;
-      const displayFields = unique([
-        ...normalizeFieldList((value as any).displayFields),
-        ...normalizeFieldList((value as any).display),
-      ]);
-      const pickerFields = unique([
-        ...normalizeFieldList((value as any).pickerFields),
-        ...normalizeFieldList((value as any).queryFields),
-        ...displayFields,
-      ]);
-      const fieldMappings = normalizeMappings((value as any).fieldMappings ?? (value as any).mappings);
-      const mappedFields = fieldMappings.map((m) => m.relatedField);
-      const fieldSet = unique([
-        relatedKeyField,
-        ...displayFields,
-        ...pickerFields,
-        ...mappedFields,
-        "$id",
-      ]);
-      result[fieldCode] = {
-        fieldCode,
-        relatedApp,
-        relatedKeyField,
-        pickerFields,
-        displayFields,
-        fieldMappings,
-        fieldSet,
-      };
-    });
-    cachedLookupConfig = result;
-    cachedLookupConfigSource = raw;
-    return cachedLookupConfig;
-  } catch (err) {
-    console.warn("failed to parse KINTONE_LOOKUP_CONFIG", err);
-    cachedLookupConfig = {};
-    cachedLookupConfigSource = raw;
-    return cachedLookupConfig;
-  }
 }
 
 function loadStaticFormDefinition(env: Env): FormProperties | null {
@@ -344,14 +274,6 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
       return new Response(JSON.stringify({ records: simplified }), { status: 200, headers: JSON_CORS_HEADERS });
     }
 
-    if (type === "lookup-config") {
-      const staticConfig = loadStaticLookupConfig(context.env);
-      return new Response(
-        JSON.stringify({ lookups: staticConfig }),
-        { status: 200, headers: JSON_CORS_HEADERS },
-      );
-    }
-
     const formDef = await fetchFormDefinition(context, forceRefresh);
     const properties = formDef.properties as Record<string, any>;
 
@@ -391,11 +313,6 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
           fieldSet,
         };
       }
-    }
-
-    if (!resolved) {
-      const staticConfig = loadStaticLookupConfig(context.env);
-      resolved = staticConfig[planFieldCode] ?? null;
     }
 
     if (!resolved) {
