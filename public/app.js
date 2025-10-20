@@ -77,6 +77,22 @@ const LOOKUP_CACHE_PREFIX = 'lookup-cache:';
 
 const getEntryMode = () => (currentView === 'start' ? 'start' : 'complete');
 
+function getFormCacheBust() {
+  try {
+    const key = 'form-cache-bust';
+    if (window.sessionStorage) {
+      const existing = window.sessionStorage.getItem(key);
+      if (existing) return existing;
+      const generated = String(Date.now());
+      window.sessionStorage.setItem(key, generated);
+      return generated;
+    }
+  } catch (err) {
+    console.warn('failed to access sessionStorage', err);
+  }
+  return String(Date.now());
+}
+
 function currentLocalDateTimeValue() {
   const now = new Date();
   now.setSeconds(0, 0);
@@ -362,7 +378,16 @@ function deriveLookupConfig(state) {
     const relatedKeyField = prop.lookup.relatedKeyField;
     if (!relatedApp || !relatedKeyField) continue;
     const pickerFields = Array.isArray(prop.lookup.lookupPickerFields)
-      ? prop.lookup.lookupPickerFields.filter((v) => typeof v === 'string')
+      ? prop.lookup.lookupPickerFields
+        .map((entry) => {
+          if (typeof entry === 'string') return entry.trim();
+          if (entry && typeof entry === 'object') {
+            const maybeField = entry.field || entry.code || entry.fieldCode;
+            if (typeof maybeField === 'string') return maybeField.trim();
+          }
+          return '';
+        })
+        .filter(Boolean)
       : [];
     const fieldMappings = mappings
       .filter((m) => m && typeof m.field === 'string' && typeof m.relatedField === 'string')
@@ -517,7 +542,10 @@ function applyFormOptions() {
 
 async function fetchFormProperties() {
   try {
-    const res = await fetch(`${API_ENDPOINT}?type=form`);
+    const params = new URLSearchParams({ type: 'form' });
+    const bust = getFormCacheBust();
+    if (bust) params.set('cacheBust', bust);
+    const res = await fetch(`${API_ENDPOINT}?${params.toString()}`);
     if (!res.ok) throw new Error(await res.text());
     const json = await res.json();
     if (!json || typeof json !== 'object' || !json.properties) return;
