@@ -8,6 +8,7 @@ export interface Env {
   KINTONE_TOKEN_LUP?: string; // 参照元(lookup)アプリのAPIトークン（閲覧権限）
   KINTONE_FORM_SCHEMA?: string; // form APIが使えない場合のフォールバックJSON
   KINTONE_LOOKUP_CONFIG?: string; // ルックアップ設定のフォールバックJSON
+  LOOKUP_CACHE?: KVNamespace; // ルックアップ元マスタを保存しておくKV
 }
 function safeJson(s: string) {
   try { return JSON.parse(s); } catch { return s; }
@@ -82,6 +83,150 @@ type ResolvedLookupConfig = {
   fieldMappings: FieldMapping[];
   fieldSet: string[];
 };
+
+const LOOKUP_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const LOOKUP_CACHE_TTL_SECONDS = Math.ceil(LOOKUP_CACHE_TTL_MS / 1000);
+const LOOKUP_CACHE_PAGE_SIZE = 500;
+
+type LookupCacheEntry = {
+  fetchedAt: number;
+  records: KintoneRecordLike[];
+};
+
+function isLookupCacheEntry(entry: unknown): entry is LookupCacheEntry {
+  return (
+    !!entry &&
+    typeof entry === "object" &&
+    typeof (entry as any).fetchedAt === "number" &&
+    Array.isArray((entry as any).records)
+  );
+}
+
+function buildLookupCacheKey(resolved: ResolvedLookupConfig) {
+  const fieldSignature = [...resolved.fieldSet].sort().join("|");
+  return `lookup:${resolved.fieldCode}:${resolved.relatedApp}:${resolved.relatedKeyField}:${fieldSignature}`;
+}
+
+async function readLookupCache(namespace: KVNamespace | undefined, key: string): Promise<LookupCacheEntry | null> {
+  if (!namespace) return null;
+  try {
+    const cached = await namespace.get<LookupCacheEntry>(key, "json");
+    if (isLookupCacheEntry(cached)) {
+      return cached;
+    }
+  } catch (err) {
+    console.warn("failed to read lookup cache", err);
+  }
+  return null;
+}
+
+async function writeLookupCache(namespace: KVNamespace | undefined, key: string, entry: LookupCacheEntry): Promise<void> {
+  if (!namespace) return;
+  try {
+    await namespace.put(key, JSON.stringify(entry), { expirationTtl: LOOKUP_CACHE_TTL_SECONDS });
+  } catch (err) {
+    console.warn("failed to write lookup cache", err);
+  }
+}
+
+async function fetchAllLookupRecords(context: RequestContext, resolved: ResolvedLookupConfig): Promise<LookupCacheEntry> {
+  const { relatedApp, relatedKeyField, fieldSet } = resolved;
+  const records: KintoneRecordLike[] = [];
+  let offset = 0;
+
+  while (true) {
+    const params = new URLSearchParams();
+    params.set("app", relatedApp);
+    params.set("query", `order by ${relatedKeyField} asc limit ${LOOKUP_CACHE_PAGE_SIZE} offset ${offset}`);
+    encodeFields(params, fieldSet);
+    const endpoint = `${context.env.KINTONE_BASE}/k/v1/records.json?${params.toString()}`;
+    const res = await fetch(endpoint, { method: "GET", headers: buildKintoneHeaders(context.env) });
+    if (!res.ok) {
+      const detail = await res.text();
+      throw new Response(JSON.stringify({ error: "kintone error", detail: safeJson(detail) }), { status: res.status, headers: JSON_CORS_HEADERS });
+    }
+    const json = await res.json();
+    const batch = Array.isArray(json?.records) ? json.records : [];
+    records.push(...batch);
+    if (batch.length < LOOKUP_CACHE_PAGE_SIZE) break;
+    offset += batch.length;
+  }
+
+  return { fetchedAt: Date.now(), records };
+}
+
+async function ensureLookupCache(
+  context: RequestContext,
+  resolved: ResolvedLookupConfig,
+  forceRefresh: boolean,
+): Promise<LookupCacheEntry> {
+  const namespace = context.env.LOOKUP_CACHE;
+  const cacheKey = buildLookupCacheKey(resolved);
+  if (!forceRefresh) {
+    const cached = await readLookupCache(namespace, cacheKey);
+    if (cached && Date.now() - cached.fetchedAt < LOOKUP_CACHE_TTL_MS) {
+      return cached;
+    }
+  }
+  const fresh = await fetchAllLookupRecords(context, resolved);
+  await writeLookupCache(namespace, cacheKey, fresh);
+  return fresh;
+}
+
+function normalizeArrayEntry(entry: unknown): string {
+  if (entry === null || entry === undefined) return "";
+  if (typeof entry === "string") return entry;
+  if (typeof entry === "number" || typeof entry === "boolean") return String(entry);
+  if (typeof entry === "object") {
+    const name = (entry as any).name;
+    if (typeof name === "string") return name;
+    const code = (entry as any).code;
+    if (typeof code === "string") return code;
+    const value = (entry as any).value;
+    if (typeof value === "string") return value;
+  }
+  try {
+    return JSON.stringify(entry);
+  } catch {
+    return String(entry);
+  }
+}
+
+function getFieldValueAsString(record: KintoneRecordLike | undefined, field: string): string {
+  if (!record) return "";
+  const entry = record[field];
+  if (!entry || !("value" in entry)) return "";
+  const raw = entry.value;
+  if (raw === null || raw === undefined) return "";
+  if (Array.isArray(raw)) {
+    return raw.map((item) => normalizeArrayEntry(item)).filter(Boolean).join(" ");
+  }
+  if (typeof raw === "object") {
+    const name = (raw as any).name;
+    if (typeof name === "string") return name;
+    const code = (raw as any).code;
+    if (typeof code === "string") return code;
+    const value = (raw as any).value;
+    if (typeof value === "string") return value;
+    try {
+      return JSON.stringify(raw);
+    } catch {
+      return String(raw);
+    }
+  }
+  return String(raw);
+}
+
+function recordMatchesTerm(record: KintoneRecordLike, fields: string[], normalizedTerm: string): boolean {
+  if (!normalizedTerm) return true;
+  for (const field of fields) {
+    const value = getFieldValueAsString(record, field);
+    if (value && value.toLowerCase().includes(normalizedTerm)) {
+      return true;
+    }
+  }
+  return false;
+}
 
 function coerceFieldList(list: unknown): string[] {
   if (!Array.isArray(list)) return [];
@@ -278,7 +423,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     const properties = formDef.properties as Record<string, any>;
 
     const planFieldCode = url.searchParams.get("field") ?? "";
-    const term = url.searchParams.get("term") ?? "";
+    const term = (url.searchParams.get("term") ?? "").trim();
     if (!planFieldCode) {
       return new Response(JSON.stringify({ error: "missing field" }), { status: 400, headers: JSON_CORS_HEADERS });
     }
@@ -320,11 +465,36 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     }
 
     const { relatedApp, relatedKeyField, pickerFields, fieldSet } = resolved;
+    const lookupCacheAvailable = Boolean(context.env.LOOKUP_CACHE);
+    const cacheSearchFields = unique([relatedKeyField, ...pickerFields]);
+
+    if (type === "lookup-cache-refresh") {
+      if (!lookupCacheAvailable) {
+        return new Response(JSON.stringify({ error: "lookup cache not configured" }), { status: 400, headers: JSON_CORS_HEADERS });
+      }
+      const dataset = await ensureLookupCache(context, resolved, true);
+      return new Response(
+        JSON.stringify({ ok: true, fetchedAt: dataset.fetchedAt, records: dataset.records.length }),
+        { status: 200, headers: JSON_CORS_HEADERS },
+      );
+    }
 
     if (type === "lookup-record") {
       const value = url.searchParams.get("value") ?? "";
       if (!value) {
         return new Response(JSON.stringify({ error: "missing value" }), { status: 400, headers: JSON_CORS_HEADERS });
+      }
+      if (lookupCacheAvailable) {
+        const dataset = await ensureLookupCache(context, resolved, forceRefresh);
+        const normalizedValue = value.trim();
+        const record = dataset.records.find((rec) => {
+          const recordValue = getFieldValueAsString(rec, relatedKeyField);
+          if (!recordValue) return false;
+          if (recordValue === value) return true;
+          if (normalizedValue && recordValue === normalizedValue) return true;
+          return false;
+        }) ?? null;
+        return new Response(JSON.stringify({ record }), { status: 200, headers: JSON_CORS_HEADERS });
       }
       const params = new URLSearchParams();
       params.set("app", relatedApp);
@@ -343,6 +513,18 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
     }
 
     if (type === "lookup-options") {
+      if (lookupCacheAvailable) {
+        const dataset = await ensureLookupCache(context, resolved, forceRefresh);
+        const normalizedTerm = term.toLowerCase();
+        const limited: KintoneRecordLike[] = [];
+        for (const record of dataset.records) {
+          if (recordMatchesTerm(record, cacheSearchFields, normalizedTerm)) {
+            limited.push(record);
+          }
+          if (limited.length >= 30) break;
+        }
+        return new Response(JSON.stringify({ records: limited }), { status: 200, headers: JSON_CORS_HEADERS });
+      }
       const params = new URLSearchParams();
       params.set("app", relatedApp);
       let query = "";
